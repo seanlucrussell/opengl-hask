@@ -3,7 +3,7 @@ module Main where
 import           Control.Applicative
 import           Control.Monad (unless,when)
 import           Data.Finite
-import           Foreign
+import qualified Foreign
 import           GHC.TypeNats
 import qualified Data.Array
 import qualified Foreign.C.String
@@ -28,7 +28,8 @@ import           Control.Applicative ((<|>), optional)
 import qualified Control.Monad (void)
 import qualified System.Exit
 
-------- linear algebra library --------
+
+--- LINEAR ALGEBRA LIBRARY -----------------------------------------------------
 
 type Vec n = Finite n -> Float
 type Mat m n = Finite m -> Finite n -> Float
@@ -52,7 +53,7 @@ instance (KnownNat m, KnownNat n) => Flatten (Mat m n) where flatten m = flip m 
 instance Flatten Vertex where flatten vertex = flatten (position vertex) ++ flatten (color vertex)
 instance Flatten a => Flatten [a] where flatten = concatMap flatten
 
-instance KnownNat n => Show (Vec n) where show v = "v" ++ show (1+fromIntegral (maxBound :: Finite n))++ show (v <$> finites)
+instance KnownNat n => Show (Vec n) where show v = "v" ++ show (1+fromIntegral (maxBound :: Finite n)) ++ show (v <$> finites)
 
 instance Num (Vec n) where
   (+) = liftA2 (+)
@@ -125,7 +126,7 @@ memo :: forall a. KnownNat a => Vec a -> Vec a
 memo v = (Data.Array.!) (Data.Array.listArray (0, fromIntegral (maxBound :: Finite a)) (map v finites)) . fromIntegral
 
 
--------- SMD parser ----------
+--- SMD PARSER -----------------------------------------------------------------
 
 data SMD_Node = SMD_Node Int String Int deriving (Show)
 data SMD_BoneFrame = SMD_BoneFrame { boneId :: Int, pos :: Vec 3, rot :: Vec 3 } deriving (Show)
@@ -139,7 +140,6 @@ data SMD_Vertex = SMD_Vertex
   } deriving (Show)
 data SMD_Triangle = SMD_Triangle { material :: String, verts :: (SMD_Vertex,SMD_Vertex,SMD_Vertex) } deriving (Show)
 data SMD = SMD { nodes :: [SMD_Node], skeleton :: [SMD_SkeletonFrame], triangles :: [SMD_Triangle] } deriving (Show)
-
 
 pSMD :: Parser SMD
 pSMD =
@@ -189,8 +189,34 @@ pSMD =
   MP.eof
   pure (SMD ns sk ts)
 
+zigscale = 0.03
+-- zigscale = 1
 
--------- OBJ parser ----------
+smdVertices :: SMD -> [Vertex]
+smdVertices smd = do
+  (va,vb,vc) <- verts <$> triangles smd
+  [  Vertex (zigscale * vPos va) (v3 1 1 1)
+   , Vertex (zigscale * vPos vb) (v3 1 1 1)
+   , Vertex (zigscale * vPos vc) (v3 1 1 1)
+   ]
+
+smdFaces :: SMD -> [Face]
+smdFaces smd = do
+  n <- [0..length (triangles smd)-1]
+  pure (3*n,3*n+1,3*n+2)
+
+smdToObj :: SMD -> Obj
+smdToObj smd = Obj (smdVertices smd) (smdFaces smd)
+
+smdNormals :: SMD -> [Vec 3]
+smdNormals smd = do
+  (va,vb,vc) <- verts <$> triangles smd
+  [  vNormal va
+   , vNormal vb
+   , vNormal vc
+   ]
+
+--- OBJ PARSER -----------------------------------------------------------------
 
 type Parser = MP.Parsec Void String
 type Face = (Int, Int, Int)
@@ -215,7 +241,6 @@ pObj =
     skipLine :: Parser (Obj -> Obj) = MP.manyTill MP.anySingle (MP.lookAhead (C.eol >> pure () <|> MP.eof)) >> pure id
     line :: Parser (Obj -> Obj) = MP.try vertexLine <|> MP.try faceLine <|> skipLine
   in fmap (foldr ($) (Obj [] [])) (MP.many (line <* optional C.eol) <* MP.eof)
-
 
 objVerts :: Obj -> [GL.GLfloat] = flatten . vertices
 objIndices :: Obj -> [GL.GLushort] = fmap fromIntegral . foldr (\(a,b,c) -> ([a,b,c]++)) [] . faces
@@ -244,7 +269,6 @@ normalModel obj = do
 
 objBufferSize obj = bufferSize (objVerts obj) + bufferSize (objIndices obj)
 
-
 cubeVerts :: [GL.GLfloat]
 cubeVerts = objVerts cubeObj
 cubeIndices :: [GL.GLushort]
@@ -254,7 +278,6 @@ pyramidVerts :: [GL.GLfloat]
 pyramidVerts = objVerts pyramidObj
 pyramidIndices :: [GL.GLushort]
 pyramidIndices = objIndices pyramidObj
-
 
 cubeObj = Obj
   { vertices =
@@ -360,7 +383,6 @@ planeObj = Obj
       squareIndices (i*planeWidth+j) (i*planeWidth+j+1) ((i+1)*planeWidth+j) ((i+1)*planeWidth+j+1)
   }
 
-
 planeNormalIndices :: [GL.GLushort]
 planeNormalIndices = [0..fromIntegral (length planeNormalVerts')-1]
 planeNormalVerts :: [GL.GLfloat]
@@ -369,11 +391,10 @@ planeNormalVerts' :: [Vertex]
 planeNormalVerts' = normalModel planeObj  
 
 
-------- main graphics program --------
+--- MAIN GRAPHICS PROGRAM ------------------------------------------------------
 
-
-size :: forall a.Storable a => Int
-size = sizeOf (undefined :: a)
+size :: forall a.Foreign.Storable a => Int
+size = Foreign.sizeOf (undefined :: a)
 
 bufferSize :: forall a n.(Foreign.Storable a, Num n) => [a] -> n
 bufferSize = fromIntegral . (*) (size @a) . length
@@ -431,7 +452,6 @@ handleEvent event appState = case SDL.eventPayload event of
   _ ->
     appState
 
-
 moveCamera direction appState = appState { cameraPosition = memo (\k ->
   case strengthen k of
     Just k -> (cameraPosition appState . weaken) k + moveSpeed * (normalize (direction . weaken)) k
@@ -450,6 +470,8 @@ moveUp =
 moveDown =
    moveCamera (v4 0 (-1) 0 1) -- or v4 0 (-1) 0 1 = l - j
 
+data ObjMetadata = ObjMetadata { vertexArrayID :: GL.GLuint, indexCount :: GL.GLsizei, indexOffset :: GL.GLintptr }
+
 main :: IO ()
 main = do
   SDL.initializeAll
@@ -457,8 +479,9 @@ main = do
   SDL.glCreateContext window
   SDL.Raw.Event.setRelativeMouseMode True
 
-  -- load model
-  teapot <- do
+  --- LOAD MODELS --------------------------------------------------------------
+
+  teapotObj <- do
     let filename = "resources/teapot.obj"
     src <- readFile filename
     case MP.parse pObj filename src of
@@ -471,59 +494,67 @@ main = do
     case MP.parse pSMD filename src of
       Left err -> print err >> System.Exit.exitFailure
       Right model -> pure model
-  print zigzagoon
 
-  graphicsConfig <- initOpenGL teapot
-
-  let loop appState = do
-        events <- SDL.pollEvents
-        SDL.pollEvents -- set keystate
-        ks <- SDL.getKeyboardState
-        let positionTransform =
-               (if ks SDL.ScancodeW then moveForward else id)
-             . (if ks SDL.ScancodeA then moveLeft else id)
-             . (if ks SDL.ScancodeS then moveBackward else id)
-             . (if ks SDL.ScancodeD then moveRight else id)
-             . (if ks SDL.ScancodeR then moveUp else id)
-             . (if ks SDL.ScancodeF then moveDown else id)
-        let newAppState = positionTransform (foldr handleEvent appState events)
-        when (windowWidth appState /= windowWidth newAppState || windowHeight appState /= windowHeight newAppState)
-          (GL.glViewport 0 0 (fromIntegral (windowWidth newAppState)) (fromIntegral (windowHeight newAppState)))
-        SDL.glSwapWindow window
-        paintGL graphicsConfig newAppState
-        unless (timeToQuit newAppState) (loop newAppState)
-  loop initialAppState
-
-  GL.glUseProgram 0
-  GL.glDeleteProgram (programID graphicsConfig)
-  SDL.destroyWindow window
-
-
-data GraphicsConfig = GraphicsConfig
-  { cubeMetadata :: ObjMetadata
-  , planeMetadata :: ObjMetadata
-  , pyramidMetadata :: ObjMetadata
-  , teapotMetadata :: ObjMetadata
-  , programID :: Word32
-  , shaderConfig :: ShaderConfig
-  }
-initOpenGL teapotObj = do
+  --- INITIALIZE OPENGL --------------------------------------------------------
 
   GL.glEnable GL.GL_DEPTH_TEST
-  -- GL.glEnable GL.GL_CULL_FACE
+  GL.glEnable GL.GL_CULL_FACE
   -- GL.glPolygonMode GL.GL_FRONT_AND_BACK GL.GL_LINE
-  ---- CONFIGURE SHADERS -----
+   
+  --- CONFIGURE SHADERS --------------------------------------------------------
+
+  let vertexShaderCode =
+        """#version 430\r\n
+        in layout(location=0) vec4 vertexPositionModelSpace;
+        in layout(location=1) vec3 vertexColor;
+        in layout(location=2) vec3 normalModelSpace;
+        uniform vec3 lightPosition;
+        uniform mat4 modelToProjectionMatrix;
+        uniform mat4 modelToWorldTransformMatrix;
+
+        out vec3 normalWorldSpace;
+        out vec3 color;
+        out vec3 vertexPositionWorldSpace;
+
+        void main() {
+          gl_Position = modelToProjectionMatrix * vertexPositionModelSpace;
+          color = vertexColor;
+          normalWorldSpace = vec3(modelToWorldTransformMatrix * vec4(normalModelSpace,0));
+          vertexPositionWorldSpace = vec3(modelToWorldTransformMatrix * vertexPositionModelSpace);
+        }
+        """
+
+  let fragmentShaderCode =
+        """#version 430\r\n
+        uniform vec3 lightPosition;
+        uniform vec3 eyePosition;
+        uniform vec4 ambientLight;
+        out vec4 daColor;
+        in vec3 normalWorldSpace;
+        in vec3 vertexPositionWorldSpace;
+        in vec3 color;
+        void main() {
+          vec3 lightVectorWorldSpace = normalize(lightPosition - vertexPositionWorldSpace);
+          float brightness = dot(lightVectorWorldSpace, normalize(normalWorldSpace));
+          vec4 diffuseLight = vec4(brightness,brightness,brightness,1.0);
+
+          vec3 reflectedLightWorldSpace = reflect(-lightVectorWorldSpace,normalWorldSpace);
+          vec3 eyeVectorWorldSpace = normalize(eyePosition - vertexPositionWorldSpace);
+          float s = pow(clamp(dot(reflectedLightWorldSpace, eyeVectorWorldSpace),0,1),64);
+          vec4 specularLight = vec4(s,s,s,1.0);
+  
+          vec4 lighting = clamp(diffuseLight,0.0,1.0) + ambientLight + clamp(specularLight,0,1);
+          daColor = lighting * vec4(color,1);
+          //daColor = clamp(specularLight,0,1);
+        }
+        """
+
+  programID <- GL.glCreateProgram
+
   vertexShaderID <- GL.glCreateShader GL.GL_VERTEX_SHADER
-  fragmentShaderID <- GL.glCreateShader GL.GL_FRAGMENT_SHADER
-  Foreign.C.String.withCString vertexShaderCode (\cstr -> with cstr $ \cstrPtr -> do
-    GL.glShaderSource vertexShaderID 1 cstrPtr nullPtr)
-  Foreign.C.String.withCString fragmentShaderCode (\cstr -> with cstr $ \cstrPtr -> do
-    GL.glShaderSource fragmentShaderID 1 cstrPtr nullPtr)
+  Foreign.C.String.withCString vertexShaderCode (\cstr -> Foreign.with cstr $ \cstrPtr ->
+    GL.glShaderSource vertexShaderID 1 cstrPtr Foreign.nullPtr)
   GL.glCompileShader vertexShaderID
-  GL.glCompileShader fragmentShaderID
-
-
-  -- check vertex shader for compilation errors
   Foreign.alloca $ \compileStatusPtr -> do
     GL.glGetShaderiv vertexShaderID GL.GL_COMPILE_STATUS compileStatusPtr
     compileStatus <- Foreign.peek compileStatusPtr
@@ -532,12 +563,17 @@ initOpenGL teapotObj = do
         GL.glGetShaderiv vertexShaderID GL.GL_INFO_LOG_LENGTH infoLogLengthPtr
         infoLogLength <- Foreign.peek infoLogLengthPtr
         Foreign.allocaArray (fromIntegral infoLogLength) $ \logPtr -> do
-          GL.glGetShaderInfoLog vertexShaderID infoLogLength nullPtr logPtr
+          GL.glGetShaderInfoLog vertexShaderID infoLogLength Foreign.nullPtr logPtr
           errorMessage <- Foreign.C.String.peekCString logPtr
           putStrLn errorMessage
           System.Exit.exitFailure
+  GL.glAttachShader programID vertexShaderID
+  GL.glDeleteShader vertexShaderID
 
-  -- check fragment shader for compilation errors
+  fragmentShaderID <- GL.glCreateShader GL.GL_FRAGMENT_SHADER
+  Foreign.C.String.withCString fragmentShaderCode (\cstr -> Foreign.with cstr $ \cstrPtr ->
+    GL.glShaderSource fragmentShaderID 1 cstrPtr Foreign.nullPtr)
+  GL.glCompileShader fragmentShaderID
   Foreign.alloca $ \compileStatusPtr -> do
     GL.glGetShaderiv fragmentShaderID GL.GL_COMPILE_STATUS compileStatusPtr
     compileStatus <- Foreign.peek compileStatusPtr
@@ -546,17 +582,14 @@ initOpenGL teapotObj = do
         GL.glGetShaderiv fragmentShaderID GL.GL_INFO_LOG_LENGTH infoLogLengthPtr
         infoLogLength <- Foreign.peek infoLogLengthPtr
         Foreign.allocaArray (fromIntegral infoLogLength) $ \logPtr -> do
-          GL.glGetShaderInfoLog fragmentShaderID infoLogLength nullPtr logPtr
+          GL.glGetShaderInfoLog fragmentShaderID infoLogLength Foreign.nullPtr logPtr
           errorMessage <- Foreign.C.String.peekCString logPtr
           putStrLn errorMessage
           System.Exit.exitFailure
-
-  programID <- GL.glCreateProgram
-  GL.glAttachShader programID vertexShaderID
   GL.glAttachShader programID fragmentShaderID
+  GL.glDeleteShader fragmentShaderID
+
   GL.glLinkProgram programID
-  
-  -- check program for linking errors
   Foreign.alloca $ \linkStatusPtr -> do
     GL.glGetProgramiv programID GL.GL_LINK_STATUS linkStatusPtr
     linkStatus <- Foreign.peek linkStatusPtr
@@ -565,20 +598,25 @@ initOpenGL teapotObj = do
         GL.glGetProgramiv programID GL.GL_INFO_LOG_LENGTH infoLogLengthPtr
         infoLogLength <- Foreign.peek infoLogLengthPtr
         Foreign.allocaArray (fromIntegral infoLogLength) $ \logPtr -> do
-          GL.glGetProgramInfoLog programID infoLogLength nullPtr logPtr
+          GL.glGetProgramInfoLog programID infoLogLength Foreign.nullPtr logPtr
           errorMessage <- Foreign.C.String.peekCString logPtr
           putStrLn errorMessage
           System.Exit.exitFailure
 
-  GL.glDeleteShader vertexShaderID
-  GL.glDeleteShader fragmentShaderID
-
   GL.glUseProgram programID
 
+  modelToProjectionMatrixUniformLocation <-
+     Foreign.C.String.withCString "modelToProjectionMatrix" (GL.glGetUniformLocation programID)
+  ambientLightUniformLocation <-
+     Foreign.C.String.withCString "ambientLight" (GL.glGetUniformLocation programID)
+  lightPositionUniformLocation <-
+     Foreign.C.String.withCString "lightPosition" (GL.glGetUniformLocation programID)
+  eyePositionUniformLocation <-
+     Foreign.C.String.withCString "eyePosition" (GL.glGetUniformLocation programID)
+  modelToWorldTransformMatrixUniformLocation <-
+     Foreign.C.String.withCString "modelToWorldTransformMatrix" (GL.glGetUniformLocation programID)
 
-  shaderConfig <- loadShaderConfig programID
-
-  -------------- SEND DATA TO GPU -----------------
+  --- SEND DATA TO GPU ---------------------------------------------------------
 
   let initializeObject obj = do
         let verts = objVerts obj
@@ -593,7 +631,7 @@ initOpenGL teapotObj = do
             GL.glGenBuffers 1 bufferIDPtr
             Foreign.peek bufferIDPtr
         GL.glBindBuffer GL.GL_ARRAY_BUFFER bufferID
-        GL.glBufferData GL.GL_ARRAY_BUFFER (objBufferSize obj) nullPtr GL.GL_STATIC_DRAW
+        GL.glBufferData GL.GL_ARRAY_BUFFER (objBufferSize obj) Foreign.nullPtr GL.GL_STATIC_DRAW
         Foreign.withArray verts         (GL.glBufferSubData GL.GL_ARRAY_BUFFER vertsOffset   (bufferSize verts))
         Foreign.withArray indices       (GL.glBufferSubData GL.GL_ARRAY_BUFFER indicesOffset (bufferSize indices))
         Foreign.withArray vertexNormals (GL.glBufferSubData GL.GL_ARRAY_BUFFER normalsOffset (bufferSize vertexNormals))
@@ -605,9 +643,9 @@ initOpenGL teapotObj = do
         GL.glEnableVertexAttribArray 1
         GL.glEnableVertexAttribArray 2
         GL.glBindBuffer GL.GL_ARRAY_BUFFER bufferID
-        GL.glVertexAttribPointer 0 3 GL.GL_FLOAT GL.GL_FALSE vertsStride (plusPtr nullPtr (fromIntegral 0))
-        GL.glVertexAttribPointer 1 3 GL.GL_FLOAT GL.GL_FALSE vertsStride (plusPtr nullPtr (fromIntegral 0 + 3*size @GL.GLfloat))
-        GL.glVertexAttribPointer 2 3 GL.GL_FLOAT GL.GL_FALSE (fromIntegral (size @GL.GLfloat) * 3) (plusPtr nullPtr (fromIntegral (bufferSize verts + bufferSize indices)))
+        GL.glVertexAttribPointer 0 3 GL.GL_FLOAT GL.GL_FALSE vertsStride (Foreign.plusPtr Foreign.nullPtr (fromIntegral 0))
+        GL.glVertexAttribPointer 1 3 GL.GL_FLOAT GL.GL_FALSE vertsStride (Foreign.plusPtr Foreign.nullPtr (fromIntegral 0 + 3*size @GL.GLfloat))
+        GL.glVertexAttribPointer 2 3 GL.GL_FLOAT GL.GL_FALSE (fromIntegral (size @GL.GLfloat) * 3) (Foreign.plusPtr Foreign.nullPtr (fromIntegral (bufferSize verts + bufferSize indices)))
         GL.glBindBuffer GL.GL_ELEMENT_ARRAY_BUFFER bufferID
         pure (ObjMetadata
               { vertexArrayID = vertexArrayObjectID
@@ -619,123 +657,113 @@ initOpenGL teapotObj = do
   pyramidMetadata <- initializeObject pyramidObj
   planeMetadata <- initializeObject planeObj
   teapotMetadata <- initializeObject teapotObj
+
+
+  let initializeZig = do
+        let obj = smdToObj zigzagoon
+        let verts = objVerts obj
+        let indices = objIndices obj
+        let vertexNormals = flatten (smdNormals zigzagoon)
+        let objBufferSize obj = bufferSize verts + bufferSize indices + bufferSize vertexNormals
+        let vertsStride = fromIntegral (size @GL.GLfloat) * 6
+        let vertsOffset = 0
+        let indicesOffset = bufferSize verts
+        let normalsOffset = indicesOffset + bufferSize indices
+        bufferID <- Foreign.alloca $ \bufferIDPtr -> do
+            GL.glGenBuffers 1 bufferIDPtr
+            Foreign.peek bufferIDPtr
+        GL.glBindBuffer GL.GL_ARRAY_BUFFER bufferID
+        GL.glBufferData GL.GL_ARRAY_BUFFER (objBufferSize obj) Foreign.nullPtr GL.GL_STATIC_DRAW
+        Foreign.withArray verts         (GL.glBufferSubData GL.GL_ARRAY_BUFFER vertsOffset   (bufferSize verts))
+        Foreign.withArray indices       (GL.glBufferSubData GL.GL_ARRAY_BUFFER indicesOffset (bufferSize indices))
+        Foreign.withArray vertexNormals (GL.glBufferSubData GL.GL_ARRAY_BUFFER normalsOffset (bufferSize vertexNormals))
+        vertexArrayObjectID <- Foreign.alloca $ \idPtr -> do
+            GL.glGenVertexArrays 1 idPtr
+            Foreign.peek idPtr
+        GL.glBindVertexArray vertexArrayObjectID
+        GL.glEnableVertexAttribArray 0
+        GL.glEnableVertexAttribArray 1
+        GL.glEnableVertexAttribArray 2
+        GL.glBindBuffer GL.GL_ARRAY_BUFFER bufferID
+        GL.glVertexAttribPointer 0 3 GL.GL_FLOAT GL.GL_FALSE vertsStride (Foreign.plusPtr Foreign.nullPtr (fromIntegral 0))
+        GL.glVertexAttribPointer 1 3 GL.GL_FLOAT GL.GL_FALSE vertsStride (Foreign.plusPtr Foreign.nullPtr (fromIntegral 0 + 3*size @GL.GLfloat))
+        GL.glVertexAttribPointer 2 3 GL.GL_FLOAT GL.GL_FALSE (fromIntegral (size @GL.GLfloat) * 3) (Foreign.plusPtr Foreign.nullPtr (fromIntegral (bufferSize verts + bufferSize indices)))
+        GL.glBindBuffer GL.GL_ELEMENT_ARRAY_BUFFER bufferID
+        pure (ObjMetadata
+              { vertexArrayID = vertexArrayObjectID
+              , indexOffset = indicesOffset
+              , indexCount = fromIntegral (length (objIndices obj))
+              })
   
-  pure (GraphicsConfig
-    { cubeMetadata = cubeMetadata
-    , planeMetadata = planeMetadata
-    , pyramidMetadata = pyramidMetadata
-    , teapotMetadata = teapotMetadata
-    , programID = programID
-    , shaderConfig = shaderConfig
-    })
-
-data ObjMetadata = ObjMetadata { vertexArrayID :: GL.GLuint, indexCount :: GL.GLsizei, indexOffset :: GL.GLintptr }
-
-paintGL graphicsConfig appState = do
-  GL.glClear GL.GL_COLOR_BUFFER_BIT
-  GL.glClear GL.GL_DEPTH_BUFFER_BIT
-
-  let lightPosition = v3 3 0 2
-
-  Foreign.withArray (flatten (v4 0.1 0.1 0.1 1)) (GL.glUniform4fv (ambientLightUniformLocation (shaderConfig graphicsConfig)) 1)
-  Foreign.withArray (flatten lightPosition) (GL.glUniform3fv (lightPositionUniformLocation (shaderConfig graphicsConfig)) 1)
-  Foreign.withArray (flatten (cameraPosition appState . weaken)) (GL.glUniform3fv (eyePositionUniformLocation (shaderConfig graphicsConfig)) 1)
-
-  let aspectRatio = fromIntegral (windowWidth appState) / fromIntegral (windowHeight appState)
-  let worldToView = worldToViewMatrix (cameraPosition appState . weaken) (viewDirection appState . weaken)
-  let projectionMatrix = projection 60 aspectRatio 0.1 50
-  let toScreenspace t = (flatten @(Mat 4 4)) (transformToMat (projectionMatrix . worldToView . t))
-  let drawTriangulation obj transform = do
-        Foreign.withArray
-          (flatten (transformToMat transform))
-          (GL.glUniformMatrix4fv (modelToWorldTransformMatrixUniformLocation (shaderConfig graphicsConfig)) 1 0)
-        GL.glBindVertexArray (vertexArrayID (obj graphicsConfig))
-        Foreign.withArray
-          (toScreenspace transform)
-          (GL.glUniformMatrix4fv (modelToProjectionMatrixUniformLocation (shaderConfig graphicsConfig)) 1 0)
-        GL.glDrawElements
-          GL.GL_TRIANGLES
-          (indexCount (obj graphicsConfig))
-          GL.GL_UNSIGNED_SHORT
-          (plusPtr nullPtr (fromIntegral (indexOffset (obj graphicsConfig))))
-
-  drawTriangulation cubeMetadata (translate (v3 1 0 (-4)) . rotation 45 (v3 1 1 0))
-  drawTriangulation cubeMetadata (translate (v3 (-1) 0 (-4)) . rotation 45 (v3 1 1 1))
-  drawTriangulation pyramidMetadata (translate (v3 0 0 (-2)))
-  drawTriangulation planeMetadata (translate (v3 0 (-2) (-4)))
-  GL.glClear GL.GL_DEPTH_BUFFER_BIT
-  drawTriangulation teapotMetadata (translate (v3 (3) 1 (-8)))
+  zigMetadata <- initializeZig
 
 
+  --- MAIN LOOP ----------------------------------------------------------------
+  
+  let loop prevAppState = do
 
 
+        --- HANDLE EVENTS ------------------------------------------------------
+        
+        events <- SDL.pollEvents
+        SDL.pollEvents -- set keystate
+        ks <- SDL.getKeyboardState
+        let positionTransform =
+               (if ks SDL.ScancodeW then moveForward else id)
+             . (if ks SDL.ScancodeA then moveLeft else id)
+             . (if ks SDL.ScancodeS then moveBackward else id)
+             . (if ks SDL.ScancodeD then moveRight else id)
+             . (if ks SDL.ScancodeR then moveUp else id)
+             . (if ks SDL.ScancodeF then moveDown else id)
+        let appState = positionTransform (foldr handleEvent prevAppState events)
+        when (windowWidth appState /= windowWidth appState || windowHeight appState /= windowHeight appState)
+          (GL.glViewport 0 0 (fromIntegral (windowWidth appState)) (fromIntegral (windowHeight appState)))
+        SDL.glSwapWindow window
 
 
+        --- DRAW ---------------------------------------------------------------
+        
+        GL.glClear GL.GL_COLOR_BUFFER_BIT
+        GL.glClear GL.GL_DEPTH_BUFFER_BIT
 
-data ShaderConfig = ShaderConfig
-  { modelToProjectionMatrixUniformLocation :: GL.GLint
-  , ambientLightUniformLocation :: GL.GLint
-  , lightPositionUniformLocation :: GL.GLint
-  , eyePositionUniformLocation :: GL.GLint
-  , modelToWorldTransformMatrixUniformLocation :: GL.GLint
-  }
+        let lightPosition = v3 3 0 2
 
-loadShaderConfig programID = do
-  modelToProjectionMatrixUniformLocation <- Foreign.C.String.withCString "modelToProjectionMatrix" (GL.glGetUniformLocation programID)
-  ambientLightUniformLocation <- Foreign.C.String.withCString "ambientLight" (GL.glGetUniformLocation programID)
-  lightPositionUniformLocation <- Foreign.C.String.withCString "lightPosition" (GL.glGetUniformLocation programID)
-  eyePositionUniformLocation <- Foreign.C.String.withCString "eyePosition" (GL.glGetUniformLocation programID)
-  modelToWorldTransformMatrixUniformLocation <- Foreign.C.String.withCString "modelToWorldTransformMatrix" (GL.glGetUniformLocation programID)
-  pure (ShaderConfig
-        { modelToProjectionMatrixUniformLocation = modelToProjectionMatrixUniformLocation
-        , ambientLightUniformLocation = ambientLightUniformLocation
-        , lightPositionUniformLocation = lightPositionUniformLocation
-        , eyePositionUniformLocation = eyePositionUniformLocation
-        , modelToWorldTransformMatrixUniformLocation = modelToWorldTransformMatrixUniformLocation
-        })
+        Foreign.withArray (flatten (v4 0.1 0.1 0.1 1)) (GL.glUniform4fv ambientLightUniformLocation 1)
+        Foreign.withArray (flatten lightPosition) (GL.glUniform3fv lightPositionUniformLocation 1)
+        Foreign.withArray (flatten (cameraPosition appState . weaken)) (GL.glUniform3fv eyePositionUniformLocation 1)
 
-vertexShaderCode =
-  """#version 430\r\n
-  in layout(location=0) vec4 vertexPositionModelSpace;
-  in layout(location=1) vec3 vertexColor;
-  in layout(location=2) vec3 normalModelSpace;
-  uniform vec3 lightPosition;
-  uniform mat4 modelToProjectionMatrix;
-  uniform mat4 modelToWorldTransformMatrix;
+        let aspectRatio = fromIntegral (windowWidth appState) / fromIntegral (windowHeight appState)
+        let worldToView = worldToViewMatrix (cameraPosition appState . weaken) (viewDirection appState . weaken)
+        let projectionMatrix = projection 60 aspectRatio 0.1 50
+        let toScreenspace t = (flatten @(Mat 4 4)) (transformToMat (projectionMatrix . worldToView . t))
+        let drawTriangulation obj transform = do
+              Foreign.withArray
+                (flatten (transformToMat transform))
+                (GL.glUniformMatrix4fv modelToWorldTransformMatrixUniformLocation 1 0)
+              GL.glBindVertexArray (vertexArrayID obj)
+              Foreign.withArray
+                (toScreenspace transform)
+                (GL.glUniformMatrix4fv modelToProjectionMatrixUniformLocation 1 0)
+              GL.glDrawElements
+                GL.GL_TRIANGLES
+                (indexCount obj)
+                GL.GL_UNSIGNED_SHORT
+                (Foreign.plusPtr Foreign.nullPtr (fromIntegral (indexOffset obj)))
 
-  out vec3 normalWorldSpace;
-  out vec3 color;
-  out vec3 vertexPositionWorldSpace;
+        drawTriangulation cubeMetadata (translate (v3 1 0 (-4)) . rotation 45 (v3 1 1 0))
+        drawTriangulation cubeMetadata (translate (v3 (-1) 0 (-4)) . rotation 45 (v3 1 1 1))
+        drawTriangulation pyramidMetadata (translate (v3 0 0 (-2)))
+        drawTriangulation planeMetadata (translate (v3 0 (-2) (-4)))
+        drawTriangulation teapotMetadata (translate (v3 (3) 1 (-8)))
+        drawTriangulation zigMetadata (translate (v3 (-2) (-1) (-1)) . rotation 90 (v3 (-1) 0 0))
 
-  void main() {
-    gl_Position = modelToProjectionMatrix * vertexPositionModelSpace;
-    color = vertexColor;
-    normalWorldSpace = vec3(modelToWorldTransformMatrix * vec4(normalModelSpace,0));
-    vertexPositionWorldSpace = vec3(modelToWorldTransformMatrix * vertexPositionModelSpace);
-  }
-  """
+        unless (timeToQuit appState) (loop appState)
 
-fragmentShaderCode =
-  """#version 430\r\n
-  uniform vec3 lightPosition;
-  uniform vec3 eyePosition;
-  uniform vec4 ambientLight;
-  out vec4 daColor;
-  in vec3 normalWorldSpace;
-  in vec3 vertexPositionWorldSpace;
-  in vec3 color;
-  void main() {
-    vec3 lightVectorWorldSpace = normalize(lightPosition - vertexPositionWorldSpace);
-    float brightness = dot(lightVectorWorldSpace, normalize(normalWorldSpace));
-    vec4 diffuseLight = vec4(brightness,brightness,brightness,1.0);
+  loop initialAppState
 
-    vec3 reflectedLightWorldSpace = reflect(-lightVectorWorldSpace,normalWorldSpace);
-    vec3 eyeVectorWorldSpace = normalize(eyePosition - vertexPositionWorldSpace);
-    float s = pow(clamp(dot(reflectedLightWorldSpace, eyeVectorWorldSpace),0,1),64);
-    vec4 specularLight = vec4(s,s,s,1.0);
-    
-    vec4 lighting = clamp(diffuseLight,0.0,1.0) + ambientLight + clamp(specularLight,0,1);
-    daColor = lighting * vec4(color,1);
-    //daColor = clamp(specularLight,0,1);
-  }
-  """
+
+  --- CLEANUP ------------------------------------------------------------------
+
+  GL.glUseProgram 0
+  GL.glDeleteProgram (programID )
+  SDL.destroyWindow window
