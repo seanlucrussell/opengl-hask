@@ -28,6 +28,11 @@ import           Control.Applicative ((<|>), optional)
 import qualified Control.Monad (void)
 import qualified System.Exit
 
+import qualified Codec.Picture
+import qualified Data.Vector.Storable
+
+import qualified Data.Set
+
 
 --- LINEAR ALGEBRA LIBRARY -----------------------------------------------------
 
@@ -215,6 +220,17 @@ smdNormals smd = do
    , vNormal vb
    , vNormal vc
    ]
+
+smdUVs :: SMD -> [Vec 2]
+smdUVs smd = do
+  (va,vb,vc) <- verts <$> triangles smd
+  [  vUV va
+   , vUV vb
+   , vUV vc
+   ]
+
+smdMats :: SMD -> Data.Set.Set String
+smdMats = Data.Set.fromList . fmap material . triangles
 
 --- OBJ PARSER -----------------------------------------------------------------
 
@@ -495,27 +511,127 @@ main = do
       Left err -> print err >> System.Exit.exitFailure
       Right model -> pure model
 
+
+  tex <- Codec.Picture.readImage "resources/Zigzagoon/images/pm0263_00_Body1.png"
+  textureID <- case tex of
+    Left err -> print err >> System.Exit.exitFailure
+    Right pic -> do
+      let img = Codec.Picture.convertRGBA8 pic
+      print (Codec.Picture.imageWidth img)
+      print (Codec.Picture.imageHeight img)
+      
+      textureID <- Foreign.alloca $ \textureIDPtr -> do
+          GL.glGenTextures 1 textureIDPtr
+          Foreign.peek textureIDPtr
+      GL.glBindTexture GL.GL_TEXTURE_2D textureID
+      -- opengl textures start at the bottom left so gotta flip
+      let flippedY = Codec.Picture.generateImage
+            (\x y -> Codec.Picture.pixelAt img x (Codec.Picture.imageHeight img - 1 - y))
+            (Codec.Picture.imageWidth img) (Codec.Picture.imageHeight img)
+      Data.Vector.Storable.unsafeWith
+         (Codec.Picture.imageData flippedY)
+         (GL.glTexImage2D
+            GL.GL_TEXTURE_2D
+            0
+            (fromIntegral GL.GL_SRGB8_ALPHA8)
+            (fromIntegral $ Codec.Picture.imageWidth img)
+            (fromIntegral $ Codec.Picture.imageHeight img)
+            0
+            GL.GL_RGBA
+            GL.GL_UNSIGNED_BYTE
+            . Foreign.castPtr)
+
+      GL.glPixelStorei GL.GL_UNPACK_ALIGNMENT 1
+
+      GL.glTexParameteri GL.GL_TEXTURE_2D GL.GL_TEXTURE_MIN_FILTER (fromIntegral GL.GL_LINEAR_MIPMAP_LINEAR)
+      GL.glTexParameteri GL.GL_TEXTURE_2D GL.GL_TEXTURE_MAG_FILTER (fromIntegral GL.GL_LINEAR)
+      GL.glTexParameteri GL.GL_TEXTURE_2D GL.GL_TEXTURE_WRAP_S (fromIntegral GL.GL_REPEAT)
+      GL.glTexParameteri GL.GL_TEXTURE_2D GL.GL_TEXTURE_WRAP_T (fromIntegral GL.GL_REPEAT)
+
+      GL.glGenerateMipmap GL.GL_TEXTURE_2D
+
+      pure textureID
+
+  -- need to generate a map: material -> (texture,indices)
+
+
   --- INITIALIZE OPENGL --------------------------------------------------------
 
   GL.glEnable GL.GL_DEPTH_TEST
   GL.glEnable GL.GL_CULL_FACE
   -- GL.glPolygonMode GL.GL_FRONT_AND_BACK GL.GL_LINE
    
+
   --- CONFIGURE SHADERS --------------------------------------------------------
 
-  let vertexShaderCode =
+  let initShader vertexShaderCode fragmentShaderCode = do
+        programID <- GL.glCreateProgram
+
+        vertexShaderID <- GL.glCreateShader GL.GL_VERTEX_SHADER
+        Foreign.C.String.withCString vertexShaderCode (\cstr -> Foreign.with cstr $ \cstrPtr ->
+          GL.glShaderSource vertexShaderID 1 cstrPtr Foreign.nullPtr)
+        GL.glCompileShader vertexShaderID
+        Foreign.alloca $ \compileStatusPtr -> do
+          GL.glGetShaderiv vertexShaderID GL.GL_COMPILE_STATUS compileStatusPtr
+          compileStatus <- Foreign.peek compileStatusPtr
+          when (compileStatus /= 1) $ do
+            Foreign.alloca $ \infoLogLengthPtr -> do
+              GL.glGetShaderiv vertexShaderID GL.GL_INFO_LOG_LENGTH infoLogLengthPtr
+              infoLogLength <- Foreign.peek infoLogLengthPtr
+              Foreign.allocaArray (fromIntegral infoLogLength) $ \logPtr -> do
+                GL.glGetShaderInfoLog vertexShaderID infoLogLength Foreign.nullPtr logPtr
+                errorMessage <- Foreign.C.String.peekCString logPtr
+                putStrLn errorMessage
+                System.Exit.exitFailure
+        GL.glAttachShader programID vertexShaderID
+        GL.glDeleteShader vertexShaderID
+
+        fragmentShaderID <- GL.glCreateShader GL.GL_FRAGMENT_SHADER
+        Foreign.C.String.withCString fragmentShaderCode (\cstr -> Foreign.with cstr $ \cstrPtr ->
+          GL.glShaderSource fragmentShaderID 1 cstrPtr Foreign.nullPtr)
+        GL.glCompileShader fragmentShaderID
+        Foreign.alloca $ \compileStatusPtr -> do
+          GL.glGetShaderiv fragmentShaderID GL.GL_COMPILE_STATUS compileStatusPtr
+          compileStatus <- Foreign.peek compileStatusPtr
+          when (compileStatus /= 1) $ do
+            Foreign.alloca $ \infoLogLengthPtr -> do
+              GL.glGetShaderiv fragmentShaderID GL.GL_INFO_LOG_LENGTH infoLogLengthPtr
+              infoLogLength <- Foreign.peek infoLogLengthPtr
+              Foreign.allocaArray (fromIntegral infoLogLength) $ \logPtr -> do
+                GL.glGetShaderInfoLog fragmentShaderID infoLogLength Foreign.nullPtr logPtr
+                errorMessage <- Foreign.C.String.peekCString logPtr
+                putStrLn errorMessage
+                System.Exit.exitFailure
+        GL.glAttachShader programID fragmentShaderID
+        GL.glDeleteShader fragmentShaderID
+
+        GL.glLinkProgram programID
+        Foreign.alloca $ \linkStatusPtr -> do
+          GL.glGetProgramiv programID GL.GL_LINK_STATUS linkStatusPtr
+          linkStatus <- Foreign.peek linkStatusPtr
+          when (linkStatus /= 1) $ do
+            Foreign.alloca $ \infoLogLengthPtr -> do
+              GL.glGetProgramiv programID GL.GL_INFO_LOG_LENGTH infoLogLengthPtr
+              infoLogLength <- Foreign.peek infoLogLengthPtr
+              Foreign.allocaArray (fromIntegral infoLogLength) $ \logPtr -> do
+                GL.glGetProgramInfoLog programID infoLogLength Foreign.nullPtr logPtr
+                errorMessage <- Foreign.C.String.peekCString logPtr
+                putStrLn errorMessage
+                System.Exit.exitFailure
+
+        pure programID
+
+
+  basicShader <- initShader
         """#version 430\r\n
+        uniform mat4 modelToProjectionMatrix;
+        uniform mat4 modelToWorldTransformMatrix;
         in layout(location=0) vec4 vertexPositionModelSpace;
         in layout(location=1) vec3 vertexColor;
         in layout(location=2) vec3 normalModelSpace;
-        uniform vec3 lightPosition;
-        uniform mat4 modelToProjectionMatrix;
-        uniform mat4 modelToWorldTransformMatrix;
-
         out vec3 normalWorldSpace;
         out vec3 color;
         out vec3 vertexPositionWorldSpace;
-
         void main() {
           gl_Position = modelToProjectionMatrix * vertexPositionModelSpace;
           color = vertexColor;
@@ -524,97 +640,93 @@ main = do
         }
         """
 
-  let fragmentShaderCode =
         """#version 430\r\n
         uniform vec3 lightPosition;
         uniform vec3 eyePosition;
         uniform vec4 ambientLight;
-        out vec4 daColor;
         in vec3 normalWorldSpace;
         in vec3 vertexPositionWorldSpace;
         in vec3 color;
+        out vec4 fragmentColor;
         void main() {
           vec3 lightVectorWorldSpace = normalize(lightPosition - vertexPositionWorldSpace);
           float brightness = dot(lightVectorWorldSpace, normalize(normalWorldSpace));
           vec4 diffuseLight = vec4(brightness,brightness,brightness,1.0);
-
           vec3 reflectedLightWorldSpace = reflect(-lightVectorWorldSpace,normalWorldSpace);
           vec3 eyeVectorWorldSpace = normalize(eyePosition - vertexPositionWorldSpace);
           float s = pow(clamp(dot(reflectedLightWorldSpace, eyeVectorWorldSpace),0,1),64);
           vec4 specularLight = vec4(s,s,s,1.0);
-  
           vec4 lighting = clamp(diffuseLight,0.0,1.0) + ambientLight + clamp(specularLight,0,1);
-          daColor = lighting * vec4(color,1);
-          //daColor = clamp(specularLight,0,1);
+          fragmentColor = lighting * vec4(color,1);
         }
         """
 
-  programID <- GL.glCreateProgram
+  modelToProjectionMatrixUniform <-
+     Foreign.C.String.withCString "modelToProjectionMatrix" (GL.glGetUniformLocation basicShader)
+  ambientLightUniform <-
+     Foreign.C.String.withCString "ambientLight" (GL.glGetUniformLocation basicShader)
+  lightPositionUniform <-
+     Foreign.C.String.withCString "lightPosition" (GL.glGetUniformLocation basicShader)
+  eyePositionUniform <-
+     Foreign.C.String.withCString "eyePosition" (GL.glGetUniformLocation basicShader)
+  modelToWorldTransformMatrixUniform <-
+     Foreign.C.String.withCString "modelToWorldTransformMatrix" (GL.glGetUniformLocation basicShader)
 
-  vertexShaderID <- GL.glCreateShader GL.GL_VERTEX_SHADER
-  Foreign.C.String.withCString vertexShaderCode (\cstr -> Foreign.with cstr $ \cstrPtr ->
-    GL.glShaderSource vertexShaderID 1 cstrPtr Foreign.nullPtr)
-  GL.glCompileShader vertexShaderID
-  Foreign.alloca $ \compileStatusPtr -> do
-    GL.glGetShaderiv vertexShaderID GL.GL_COMPILE_STATUS compileStatusPtr
-    compileStatus <- Foreign.peek compileStatusPtr
-    when (compileStatus /= 1) $ do
-      Foreign.alloca $ \infoLogLengthPtr -> do
-        GL.glGetShaderiv vertexShaderID GL.GL_INFO_LOG_LENGTH infoLogLengthPtr
-        infoLogLength <- Foreign.peek infoLogLengthPtr
-        Foreign.allocaArray (fromIntegral infoLogLength) $ \logPtr -> do
-          GL.glGetShaderInfoLog vertexShaderID infoLogLength Foreign.nullPtr logPtr
-          errorMessage <- Foreign.C.String.peekCString logPtr
-          putStrLn errorMessage
-          System.Exit.exitFailure
-  GL.glAttachShader programID vertexShaderID
-  GL.glDeleteShader vertexShaderID
 
-  fragmentShaderID <- GL.glCreateShader GL.GL_FRAGMENT_SHADER
-  Foreign.C.String.withCString fragmentShaderCode (\cstr -> Foreign.with cstr $ \cstrPtr ->
-    GL.glShaderSource fragmentShaderID 1 cstrPtr Foreign.nullPtr)
-  GL.glCompileShader fragmentShaderID
-  Foreign.alloca $ \compileStatusPtr -> do
-    GL.glGetShaderiv fragmentShaderID GL.GL_COMPILE_STATUS compileStatusPtr
-    compileStatus <- Foreign.peek compileStatusPtr
-    when (compileStatus /= 1) $ do
-      Foreign.alloca $ \infoLogLengthPtr -> do
-        GL.glGetShaderiv fragmentShaderID GL.GL_INFO_LOG_LENGTH infoLogLengthPtr
-        infoLogLength <- Foreign.peek infoLogLengthPtr
-        Foreign.allocaArray (fromIntegral infoLogLength) $ \logPtr -> do
-          GL.glGetShaderInfoLog fragmentShaderID infoLogLength Foreign.nullPtr logPtr
-          errorMessage <- Foreign.C.String.peekCString logPtr
-          putStrLn errorMessage
-          System.Exit.exitFailure
-  GL.glAttachShader programID fragmentShaderID
-  GL.glDeleteShader fragmentShaderID
+  textureShader <- initShader 
+        """#version 430\r\n
+        uniform mat4 modelToProjectionMatrix;
+        uniform mat4 modelToWorldTransformMatrix;
+        in layout(location=0) vec4 vertexPositionModelSpace;
+        in layout(location=1) vec3 vertexColor;
+        in layout(location=2) vec3 normalModelSpace;
+        in layout(location=3) vec2 vertex_uv;
+        out vec3 normalWorldSpace;
+        out vec2 fragment_uv;
+        out vec3 vertexPositionWorldSpace;
+        void main() {
+          gl_Position = modelToProjectionMatrix * vertexPositionModelSpace;
+          normalWorldSpace = vec3(modelToWorldTransformMatrix * vec4(normalModelSpace,0));
+          vertexPositionWorldSpace = vec3(modelToWorldTransformMatrix * vertexPositionModelSpace);
+          fragment_uv = vertex_uv;
+        }
+        """
 
-  GL.glLinkProgram programID
-  Foreign.alloca $ \linkStatusPtr -> do
-    GL.glGetProgramiv programID GL.GL_LINK_STATUS linkStatusPtr
-    linkStatus <- Foreign.peek linkStatusPtr
-    when (linkStatus /= 1) $ do
-      Foreign.alloca $ \infoLogLengthPtr -> do
-        GL.glGetProgramiv programID GL.GL_INFO_LOG_LENGTH infoLogLengthPtr
-        infoLogLength <- Foreign.peek infoLogLengthPtr
-        Foreign.allocaArray (fromIntegral infoLogLength) $ \logPtr -> do
-          GL.glGetProgramInfoLog programID infoLogLength Foreign.nullPtr logPtr
-          errorMessage <- Foreign.C.String.peekCString logPtr
-          putStrLn errorMessage
-          System.Exit.exitFailure
+        """#version 430\r\n
+        uniform vec3 lightPosition;
+        uniform vec3 eyePosition;
+        uniform vec4 ambientLight;
+        uniform sampler2D base_texture;
+        in vec3 normalWorldSpace;
+        in vec3 vertexPositionWorldSpace;
+        in vec2 fragment_uv;
+        out vec4 fragmentColor;
+        void main() {
+          vec3 lightVectorWorldSpace = normalize(lightPosition - vertexPositionWorldSpace);
+          float brightness = dot(lightVectorWorldSpace, normalize(normalWorldSpace));
+          vec4 diffuseLight = vec4(brightness,brightness,brightness,1.0);
+          vec3 reflectedLightWorldSpace = reflect(-lightVectorWorldSpace,normalWorldSpace);
+          vec3 eyeVectorWorldSpace = normalize(eyePosition - vertexPositionWorldSpace);
+          float s = pow(clamp(dot(reflectedLightWorldSpace, eyeVectorWorldSpace),0,1),512);
+          vec4 specularLight = vec4(s,s,s,1.0);
+          vec4 lighting = clamp(diffuseLight,0.0,1.0) + ambientLight + clamp(specularLight,0,1);
+          fragmentColor = lighting * texture(base_texture,fragment_uv);
+        }
+        """
 
-  GL.glUseProgram programID
+  texture_modelToProjectionMatrixUniform <-
+     Foreign.C.String.withCString "modelToProjectionMatrix" (GL.glGetUniformLocation textureShader)
+  texture_ambientLightUniform <-
+     Foreign.C.String.withCString "ambientLight" (GL.glGetUniformLocation textureShader)
+  texture_lightPositionUniform <-
+     Foreign.C.String.withCString "lightPosition" (GL.glGetUniformLocation textureShader)
+  texture_eyePositionUniform <-
+     Foreign.C.String.withCString "eyePosition" (GL.glGetUniformLocation textureShader)
+  texture_modelToWorldTransformMatrixUniform <-
+     Foreign.C.String.withCString "modelToWorldTransformMatrix" (GL.glGetUniformLocation textureShader)
+  texture_textureUniform <-
+     Foreign.C.String.withCString "base_texture" (GL.glGetUniformLocation textureShader)
 
-  modelToProjectionMatrixUniformLocation <-
-     Foreign.C.String.withCString "modelToProjectionMatrix" (GL.glGetUniformLocation programID)
-  ambientLightUniformLocation <-
-     Foreign.C.String.withCString "ambientLight" (GL.glGetUniformLocation programID)
-  lightPositionUniformLocation <-
-     Foreign.C.String.withCString "lightPosition" (GL.glGetUniformLocation programID)
-  eyePositionUniformLocation <-
-     Foreign.C.String.withCString "eyePosition" (GL.glGetUniformLocation programID)
-  modelToWorldTransformMatrixUniformLocation <-
-     Foreign.C.String.withCString "modelToWorldTransformMatrix" (GL.glGetUniformLocation programID)
 
   --- SEND DATA TO GPU ---------------------------------------------------------
 
@@ -645,7 +757,7 @@ main = do
         GL.glBindBuffer GL.GL_ARRAY_BUFFER bufferID
         GL.glVertexAttribPointer 0 3 GL.GL_FLOAT GL.GL_FALSE vertsStride (Foreign.plusPtr Foreign.nullPtr (fromIntegral 0))
         GL.glVertexAttribPointer 1 3 GL.GL_FLOAT GL.GL_FALSE vertsStride (Foreign.plusPtr Foreign.nullPtr (fromIntegral 0 + 3*size @GL.GLfloat))
-        GL.glVertexAttribPointer 2 3 GL.GL_FLOAT GL.GL_FALSE (fromIntegral (size @GL.GLfloat) * 3) (Foreign.plusPtr Foreign.nullPtr (fromIntegral (bufferSize verts + bufferSize indices)))
+        GL.glVertexAttribPointer 2 3 GL.GL_FLOAT GL.GL_FALSE (fromIntegral (size @GL.GLfloat) * 3) (Foreign.plusPtr Foreign.nullPtr (fromIntegral normalsOffset))
         GL.glBindBuffer GL.GL_ELEMENT_ARRAY_BUFFER bufferID
         pure (ObjMetadata
               { vertexArrayID = vertexArrayObjectID
@@ -663,20 +775,22 @@ main = do
         let obj = smdToObj zigzagoon
         let verts = objVerts obj
         let indices = objIndices obj
-        let vertexNormals = flatten (smdNormals zigzagoon)
-        let objBufferSize obj = bufferSize verts + bufferSize indices + bufferSize vertexNormals
-        let vertsStride = fromIntegral (size @GL.GLfloat) * 6
+        let normals = flatten (smdNormals zigzagoon)
+        let uvs = flatten (smdUVs zigzagoon)
+        let objBufferSize obj = bufferSize verts + bufferSize indices + bufferSize normals + bufferSize uvs
         let vertsOffset = 0
         let indicesOffset = bufferSize verts
         let normalsOffset = indicesOffset + bufferSize indices
+        let uvsOffset = normalsOffset + bufferSize normals
         bufferID <- Foreign.alloca $ \bufferIDPtr -> do
             GL.glGenBuffers 1 bufferIDPtr
             Foreign.peek bufferIDPtr
         GL.glBindBuffer GL.GL_ARRAY_BUFFER bufferID
         GL.glBufferData GL.GL_ARRAY_BUFFER (objBufferSize obj) Foreign.nullPtr GL.GL_STATIC_DRAW
-        Foreign.withArray verts         (GL.glBufferSubData GL.GL_ARRAY_BUFFER vertsOffset   (bufferSize verts))
-        Foreign.withArray indices       (GL.glBufferSubData GL.GL_ARRAY_BUFFER indicesOffset (bufferSize indices))
-        Foreign.withArray vertexNormals (GL.glBufferSubData GL.GL_ARRAY_BUFFER normalsOffset (bufferSize vertexNormals))
+        Foreign.withArray verts   (GL.glBufferSubData GL.GL_ARRAY_BUFFER vertsOffset   (bufferSize verts))
+        Foreign.withArray indices (GL.glBufferSubData GL.GL_ARRAY_BUFFER indicesOffset (bufferSize indices))
+        Foreign.withArray normals (GL.glBufferSubData GL.GL_ARRAY_BUFFER normalsOffset (bufferSize normals))
+        Foreign.withArray uvs     (GL.glBufferSubData GL.GL_ARRAY_BUFFER uvsOffset     (bufferSize uvs))
         vertexArrayObjectID <- Foreign.alloca $ \idPtr -> do
             GL.glGenVertexArrays 1 idPtr
             Foreign.peek idPtr
@@ -684,10 +798,12 @@ main = do
         GL.glEnableVertexAttribArray 0
         GL.glEnableVertexAttribArray 1
         GL.glEnableVertexAttribArray 2
+        GL.glEnableVertexAttribArray 3
         GL.glBindBuffer GL.GL_ARRAY_BUFFER bufferID
-        GL.glVertexAttribPointer 0 3 GL.GL_FLOAT GL.GL_FALSE vertsStride (Foreign.plusPtr Foreign.nullPtr (fromIntegral 0))
-        GL.glVertexAttribPointer 1 3 GL.GL_FLOAT GL.GL_FALSE vertsStride (Foreign.plusPtr Foreign.nullPtr (fromIntegral 0 + 3*size @GL.GLfloat))
-        GL.glVertexAttribPointer 2 3 GL.GL_FLOAT GL.GL_FALSE (fromIntegral (size @GL.GLfloat) * 3) (Foreign.plusPtr Foreign.nullPtr (fromIntegral (bufferSize verts + bufferSize indices)))
+        GL.glVertexAttribPointer 0 3 GL.GL_FLOAT GL.GL_FALSE (fromIntegral (size @GL.GLfloat) * 6) (Foreign.plusPtr Foreign.nullPtr (fromIntegral 0))
+        GL.glVertexAttribPointer 1 3 GL.GL_FLOAT GL.GL_FALSE (fromIntegral (size @GL.GLfloat) * 6) (Foreign.plusPtr Foreign.nullPtr (fromIntegral 0 + 3*size @GL.GLfloat))
+        GL.glVertexAttribPointer 2 3 GL.GL_FLOAT GL.GL_FALSE (fromIntegral (size @GL.GLfloat) * 3) (Foreign.plusPtr Foreign.nullPtr (fromIntegral normalsOffset))
+        GL.glVertexAttribPointer 3 2 GL.GL_FLOAT GL.GL_FALSE (fromIntegral (size @GL.GLfloat) * 2) (Foreign.plusPtr Foreign.nullPtr (fromIntegral uvsOffset))
         GL.glBindBuffer GL.GL_ELEMENT_ARRAY_BUFFER bufferID
         pure (ObjMetadata
               { vertexArrayID = vertexArrayObjectID
@@ -726,11 +842,13 @@ main = do
         GL.glClear GL.GL_COLOR_BUFFER_BIT
         GL.glClear GL.GL_DEPTH_BUFFER_BIT
 
+        GL.glUseProgram basicShader
+
         let lightPosition = v3 3 0 2
 
-        Foreign.withArray (flatten (v4 0.1 0.1 0.1 1)) (GL.glUniform4fv ambientLightUniformLocation 1)
-        Foreign.withArray (flatten lightPosition) (GL.glUniform3fv lightPositionUniformLocation 1)
-        Foreign.withArray (flatten (cameraPosition appState . weaken)) (GL.glUniform3fv eyePositionUniformLocation 1)
+        Foreign.withArray (flatten (v4 0.1 0.1 0.1 1)) (GL.glUniform4fv ambientLightUniform 1)
+        Foreign.withArray (flatten lightPosition) (GL.glUniform3fv lightPositionUniform 1)
+        Foreign.withArray (flatten (cameraPosition appState . weaken)) (GL.glUniform3fv eyePositionUniform 1)
 
         let aspectRatio = fromIntegral (windowWidth appState) / fromIntegral (windowHeight appState)
         let worldToView = worldToViewMatrix (cameraPosition appState . weaken) (viewDirection appState . weaken)
@@ -739,22 +857,28 @@ main = do
         let drawTriangulation obj transform = do
               Foreign.withArray
                 (flatten (transformToMat transform))
-                (GL.glUniformMatrix4fv modelToWorldTransformMatrixUniformLocation 1 0)
+                (GL.glUniformMatrix4fv modelToWorldTransformMatrixUniform 1 0)
               GL.glBindVertexArray (vertexArrayID obj)
               Foreign.withArray
                 (toScreenspace transform)
-                (GL.glUniformMatrix4fv modelToProjectionMatrixUniformLocation 1 0)
+                (GL.glUniformMatrix4fv modelToProjectionMatrixUniform 1 0)
               GL.glDrawElements
                 GL.GL_TRIANGLES
                 (indexCount obj)
                 GL.GL_UNSIGNED_SHORT
                 (Foreign.plusPtr Foreign.nullPtr (fromIntegral (indexOffset obj)))
 
+
         drawTriangulation cubeMetadata (translate (v3 1 0 (-4)) . rotation 45 (v3 1 1 0))
         drawTriangulation cubeMetadata (translate (v3 (-1) 0 (-4)) . rotation 45 (v3 1 1 1))
         drawTriangulation pyramidMetadata (translate (v3 0 0 (-2)))
         drawTriangulation planeMetadata (translate (v3 0 (-2) (-4)))
         drawTriangulation teapotMetadata (translate (v3 (3) 1 (-8)))
+
+        GL.glUseProgram textureShader
+        GL.glActiveTexture GL.GL_TEXTURE0
+        GL.glBindTexture GL.GL_TEXTURE_2D textureID
+        GL.glUniform1i texture_textureUniform 0
         drawTriangulation zigMetadata (translate (v3 (-2) (-1) (-1)) . rotation 90 (v3 (-1) 0 0))
 
         unless (timeToQuit appState) (loop appState)
@@ -765,5 +889,5 @@ main = do
   --- CLEANUP ------------------------------------------------------------------
 
   GL.glUseProgram 0
-  GL.glDeleteProgram (programID )
+  GL.glDeleteProgram basicShader
   SDL.destroyWindow window

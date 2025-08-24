@@ -30,6 +30,6 @@ executable opengl-hask
 
     -- LANGUAGE extensions used by modules in this package.
     -- other-extensions:
-    build-depends:    base,linear-base,sdl2,OpenGLRaw,finite-typelits,array,random,template-haskell,megaparsec
+    build-depends:    base,linear-base,sdl2,OpenGLRaw,finite-typelits,array,random,JuicyPixels,megaparsec,vector,containers
     hs-source-dirs:   app
     default-language: Haskell2010
