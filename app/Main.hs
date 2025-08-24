@@ -32,6 +32,8 @@ import qualified Codec.Picture
 import qualified Data.Vector.Storable
 
 import qualified Data.Set
+import qualified Data.Map
+import qualified Data.Map.Internal
 
 
 --- LINEAR ALGEBRA LIBRARY -----------------------------------------------------
@@ -486,7 +488,7 @@ moveUp =
 moveDown =
    moveCamera (v4 0 (-1) 0 1) -- or v4 0 (-1) 0 1 = l - j
 
-data ObjMetadata = ObjMetadata { vertexArrayID :: GL.GLuint, indexCount :: GL.GLsizei, indexOffset :: GL.GLintptr }
+data ObjMetadata = ObjMetadata { vertexArrayID :: GL.GLuint, indexCount :: GL.GLsizei, indexOffset :: GL.GLintptr } deriving Show
 
 main :: IO ()
 main = do
@@ -494,65 +496,6 @@ main = do
   window <- SDL.createWindow "App" (SDL.defaultWindow {SDL.windowGraphicsContext=SDL.OpenGLContext SDL.defaultOpenGL})
   SDL.glCreateContext window
   SDL.Raw.Event.setRelativeMouseMode True
-
-  --- LOAD MODELS --------------------------------------------------------------
-
-  teapotObj <- do
-    let filename = "resources/teapot.obj"
-    src <- readFile filename
-    case MP.parse pObj filename src of
-      Left err -> print err >> System.Exit.exitFailure
-      Right teapot -> pure teapot
-
-  zigzagoon <- do
-    let filename = "resources/Zigzagoon/Zigzagoon.SMD"
-    src <- readFile filename
-    case MP.parse pSMD filename src of
-      Left err -> print err >> System.Exit.exitFailure
-      Right model -> pure model
-
-
-  tex <- Codec.Picture.readImage "resources/Zigzagoon/images/pm0263_00_Body1.png"
-  textureID <- case tex of
-    Left err -> print err >> System.Exit.exitFailure
-    Right pic -> do
-      let img = Codec.Picture.convertRGBA8 pic
-      print (Codec.Picture.imageWidth img)
-      print (Codec.Picture.imageHeight img)
-      
-      textureID <- Foreign.alloca $ \textureIDPtr -> do
-          GL.glGenTextures 1 textureIDPtr
-          Foreign.peek textureIDPtr
-      GL.glBindTexture GL.GL_TEXTURE_2D textureID
-      -- opengl textures start at the bottom left so gotta flip
-      let flippedY = Codec.Picture.generateImage
-            (\x y -> Codec.Picture.pixelAt img x (Codec.Picture.imageHeight img - 1 - y))
-            (Codec.Picture.imageWidth img) (Codec.Picture.imageHeight img)
-      Data.Vector.Storable.unsafeWith
-         (Codec.Picture.imageData flippedY)
-         (GL.glTexImage2D
-            GL.GL_TEXTURE_2D
-            0
-            (fromIntegral GL.GL_SRGB8_ALPHA8)
-            (fromIntegral $ Codec.Picture.imageWidth img)
-            (fromIntegral $ Codec.Picture.imageHeight img)
-            0
-            GL.GL_RGBA
-            GL.GL_UNSIGNED_BYTE
-            . Foreign.castPtr)
-
-      GL.glPixelStorei GL.GL_UNPACK_ALIGNMENT 1
-
-      GL.glTexParameteri GL.GL_TEXTURE_2D GL.GL_TEXTURE_MIN_FILTER (fromIntegral GL.GL_LINEAR_MIPMAP_LINEAR)
-      GL.glTexParameteri GL.GL_TEXTURE_2D GL.GL_TEXTURE_MAG_FILTER (fromIntegral GL.GL_LINEAR)
-      GL.glTexParameteri GL.GL_TEXTURE_2D GL.GL_TEXTURE_WRAP_S (fromIntegral GL.GL_REPEAT)
-      GL.glTexParameteri GL.GL_TEXTURE_2D GL.GL_TEXTURE_WRAP_T (fromIntegral GL.GL_REPEAT)
-
-      GL.glGenerateMipmap GL.GL_TEXTURE_2D
-
-      pure textureID
-
-  -- need to generate a map: material -> (texture,indices)
 
 
   --- INITIALIZE OPENGL --------------------------------------------------------
@@ -673,6 +616,64 @@ main = do
      Foreign.C.String.withCString "modelToWorldTransformMatrix" (GL.glGetUniformLocation basicShader)
 
 
+  teapotObj <- do
+    let filename = "resources/teapot.obj"
+    src <- readFile filename
+    case MP.parse pObj filename src of
+      Left err -> print err >> System.Exit.exitFailure
+      Right teapot -> pure teapot
+
+
+
+  --- SEND DATA TO GPU ---------------------------------------------------------
+
+  let initializeObject obj = do
+        let verts = objVerts obj
+        let indices = objIndices obj
+        let vertexNormals = flatten (normals obj)
+        let objBufferSize obj = bufferSize verts + bufferSize indices + bufferSize vertexNormals
+        let vertsStride = fromIntegral (size @GL.GLfloat) * 6
+        let vertsOffset = 0
+        let indicesOffset = bufferSize verts
+        let normalsOffset = indicesOffset + bufferSize indices
+        bufferID <- Foreign.alloca $ \bufferIDPtr -> do
+            GL.glGenBuffers 1 bufferIDPtr
+            Foreign.peek bufferIDPtr
+        GL.glBindBuffer GL.GL_ARRAY_BUFFER bufferID
+        GL.glBufferData GL.GL_ARRAY_BUFFER (objBufferSize obj) Foreign.nullPtr GL.GL_STATIC_DRAW
+        Foreign.withArray verts         (GL.glBufferSubData GL.GL_ARRAY_BUFFER vertsOffset   (bufferSize verts))
+        Foreign.withArray indices       (GL.glBufferSubData GL.GL_ARRAY_BUFFER indicesOffset (bufferSize indices))
+        Foreign.withArray vertexNormals (GL.glBufferSubData GL.GL_ARRAY_BUFFER normalsOffset (bufferSize vertexNormals))
+        vertexArrayObjectID <- Foreign.alloca $ \idPtr -> do
+            GL.glGenVertexArrays 1 idPtr
+            Foreign.peek idPtr
+        GL.glBindVertexArray vertexArrayObjectID
+        GL.glEnableVertexAttribArray 0
+        GL.glEnableVertexAttribArray 1
+        GL.glEnableVertexAttribArray 2
+        GL.glBindBuffer GL.GL_ARRAY_BUFFER bufferID
+        GL.glVertexAttribPointer 0 3 GL.GL_FLOAT GL.GL_FALSE vertsStride (Foreign.plusPtr Foreign.nullPtr (fromIntegral 0))
+        GL.glVertexAttribPointer 1 3 GL.GL_FLOAT GL.GL_FALSE vertsStride (Foreign.plusPtr Foreign.nullPtr (fromIntegral 0 + 3*size @GL.GLfloat))
+        GL.glVertexAttribPointer 2 3 GL.GL_FLOAT GL.GL_FALSE (fromIntegral (size @GL.GLfloat) * 3) (Foreign.plusPtr Foreign.nullPtr (fromIntegral normalsOffset))
+        GL.glBindBuffer GL.GL_ELEMENT_ARRAY_BUFFER bufferID
+        pure (ObjMetadata
+              { vertexArrayID = vertexArrayObjectID
+              , indexOffset = indicesOffset
+              , indexCount = fromIntegral (length (objIndices obj))
+              })
+  
+  cubeMetadata <- initializeObject cubeObj
+  pyramidMetadata <- initializeObject pyramidObj
+  planeMetadata <- initializeObject planeObj
+  teapotMetadata <- initializeObject teapotObj
+
+
+
+
+
+
+
+
   textureShader <- initShader 
         """#version 430\r\n
         uniform mat4 modelToProjectionMatrix;
@@ -728,48 +729,103 @@ main = do
      Foreign.C.String.withCString "base_texture" (GL.glGetUniformLocation textureShader)
 
 
-  --- SEND DATA TO GPU ---------------------------------------------------------
+  zigzagoon <- do
+    let filename = "resources/Zigzagoon/Zigzagoon.SMD"
+    src <- readFile filename
+    case MP.parse pSMD filename src of
+      Left err -> print err >> System.Exit.exitFailure
+      Right model -> pure model
 
-  let initializeObject obj = do
-        let verts = objVerts obj
-        let indices = objIndices obj
-        let vertexNormals = flatten (normals obj)
-        let objBufferSize obj = bufferSize verts + bufferSize indices + bufferSize vertexNormals
-        let vertsStride = fromIntegral (size @GL.GLfloat) * 6
-        let vertsOffset = 0
-        let indicesOffset = bufferSize verts
-        let normalsOffset = indicesOffset + bufferSize indices
-        bufferID <- Foreign.alloca $ \bufferIDPtr -> do
-            GL.glGenBuffers 1 bufferIDPtr
-            Foreign.peek bufferIDPtr
-        GL.glBindBuffer GL.GL_ARRAY_BUFFER bufferID
-        GL.glBufferData GL.GL_ARRAY_BUFFER (objBufferSize obj) Foreign.nullPtr GL.GL_STATIC_DRAW
-        Foreign.withArray verts         (GL.glBufferSubData GL.GL_ARRAY_BUFFER vertsOffset   (bufferSize verts))
-        Foreign.withArray indices       (GL.glBufferSubData GL.GL_ARRAY_BUFFER indicesOffset (bufferSize indices))
-        Foreign.withArray vertexNormals (GL.glBufferSubData GL.GL_ARRAY_BUFFER normalsOffset (bufferSize vertexNormals))
-        vertexArrayObjectID <- Foreign.alloca $ \idPtr -> do
-            GL.glGenVertexArrays 1 idPtr
-            Foreign.peek idPtr
-        GL.glBindVertexArray vertexArrayObjectID
-        GL.glEnableVertexAttribArray 0
-        GL.glEnableVertexAttribArray 1
-        GL.glEnableVertexAttribArray 2
-        GL.glBindBuffer GL.GL_ARRAY_BUFFER bufferID
-        GL.glVertexAttribPointer 0 3 GL.GL_FLOAT GL.GL_FALSE vertsStride (Foreign.plusPtr Foreign.nullPtr (fromIntegral 0))
-        GL.glVertexAttribPointer 1 3 GL.GL_FLOAT GL.GL_FALSE vertsStride (Foreign.plusPtr Foreign.nullPtr (fromIntegral 0 + 3*size @GL.GLfloat))
-        GL.glVertexAttribPointer 2 3 GL.GL_FLOAT GL.GL_FALSE (fromIntegral (size @GL.GLfloat) * 3) (Foreign.plusPtr Foreign.nullPtr (fromIntegral normalsOffset))
-        GL.glBindBuffer GL.GL_ELEMENT_ARRAY_BUFFER bufferID
-        pure (ObjMetadata
-              { vertexArrayID = vertexArrayObjectID
-              , indexOffset = indicesOffset
-              , indexCount = fromIntegral (length (objIndices obj))
-              })
-  
-  cubeMetadata <- initializeObject cubeObj
-  pyramidMetadata <- initializeObject pyramidObj
-  planeMetadata <- initializeObject planeObj
-  teapotMetadata <- initializeObject teapotObj
+  let zigmats = smdMats zigzagoon
 
+  let readTex matName = do
+          print matName
+          tex <- Codec.Picture.readImage ("resources/Zigzagoon/images/" ++ matName)
+          case tex of
+            Left err -> print err >> System.Exit.exitFailure
+            Right pic -> do
+              let img = Codec.Picture.convertRGBA8 pic
+
+              textureID <- Foreign.alloca $ \textureIDPtr -> do
+                  GL.glGenTextures 1 textureIDPtr
+                  Foreign.peek textureIDPtr
+              GL.glBindTexture GL.GL_TEXTURE_2D textureID
+              -- opengl textures start at the bottom left so gotta flip
+              let flippedY = Codec.Picture.generateImage
+                    (\x y -> Codec.Picture.pixelAt img x (Codec.Picture.imageHeight img - 1 - y))
+                    (Codec.Picture.imageWidth img) (Codec.Picture.imageHeight img)
+              Data.Vector.Storable.unsafeWith
+                 (Codec.Picture.imageData flippedY)
+                 (GL.glTexImage2D
+                    GL.GL_TEXTURE_2D
+                    0
+                    (fromIntegral GL.GL_SRGB8_ALPHA8)
+                    (fromIntegral $ Codec.Picture.imageWidth img)
+                    (fromIntegral $ Codec.Picture.imageHeight img)
+                    0
+                    GL.GL_RGBA
+                    GL.GL_UNSIGNED_BYTE
+                    . Foreign.castPtr)
+
+              GL.glPixelStorei GL.GL_UNPACK_ALIGNMENT 1
+
+              GL.glTexParameteri GL.GL_TEXTURE_2D GL.GL_TEXTURE_MIN_FILTER (fromIntegral GL.GL_LINEAR_MIPMAP_LINEAR)
+              GL.glTexParameteri GL.GL_TEXTURE_2D GL.GL_TEXTURE_MAG_FILTER (fromIntegral GL.GL_LINEAR)
+              GL.glTexParameteri GL.GL_TEXTURE_2D GL.GL_TEXTURE_WRAP_S (fromIntegral GL.GL_REPEAT)
+              GL.glTexParameteri GL.GL_TEXTURE_2D GL.GL_TEXTURE_WRAP_T (fromIntegral GL.GL_REPEAT)
+
+              GL.glGenerateMipmap GL.GL_TEXTURE_2D
+
+              let smd = zigzagoon {triangles = filter (\v -> material v == matName) (triangles zigzagoon)}
+              let obj = smdToObj smd
+              let verts = objVerts obj
+              let indices = objIndices obj
+              let normals = flatten (smdNormals smd)
+              let uvs = flatten (smdUVs smd)
+              let objBufferSize obj = bufferSize verts + bufferSize indices + bufferSize normals + bufferSize uvs
+              let vertsOffset = 0
+              let indicesOffset = bufferSize verts
+              let normalsOffset = indicesOffset + bufferSize indices
+              let uvsOffset = normalsOffset + bufferSize normals
+              bufferID <- Foreign.alloca $ \bufferIDPtr -> do
+                  GL.glGenBuffers 1 bufferIDPtr
+                  Foreign.peek bufferIDPtr
+              GL.glBindBuffer GL.GL_ARRAY_BUFFER bufferID
+              GL.glBufferData GL.GL_ARRAY_BUFFER (objBufferSize obj) Foreign.nullPtr GL.GL_STATIC_DRAW
+              Foreign.withArray verts   (GL.glBufferSubData GL.GL_ARRAY_BUFFER vertsOffset   (bufferSize verts))
+              Foreign.withArray indices (GL.glBufferSubData GL.GL_ARRAY_BUFFER indicesOffset (bufferSize indices))
+              Foreign.withArray normals (GL.glBufferSubData GL.GL_ARRAY_BUFFER normalsOffset (bufferSize normals))
+              Foreign.withArray uvs     (GL.glBufferSubData GL.GL_ARRAY_BUFFER uvsOffset     (bufferSize uvs))
+              vertexArrayObjectID <- Foreign.alloca $ \idPtr -> do
+                  GL.glGenVertexArrays 1 idPtr
+                  Foreign.peek idPtr
+              GL.glBindVertexArray vertexArrayObjectID
+              GL.glEnableVertexAttribArray 0
+              GL.glEnableVertexAttribArray 1
+              GL.glEnableVertexAttribArray 2
+              GL.glEnableVertexAttribArray 3
+              GL.glBindBuffer GL.GL_ARRAY_BUFFER bufferID
+              GL.glVertexAttribPointer 0 3 GL.GL_FLOAT GL.GL_FALSE (fromIntegral (size @GL.GLfloat) * 6) (Foreign.plusPtr Foreign.nullPtr (fromIntegral 0))
+              GL.glVertexAttribPointer 1 3 GL.GL_FLOAT GL.GL_FALSE (fromIntegral (size @GL.GLfloat) * 6) (Foreign.plusPtr Foreign.nullPtr (fromIntegral 0 + 3*size @GL.GLfloat))
+              GL.glVertexAttribPointer 2 3 GL.GL_FLOAT GL.GL_FALSE (fromIntegral (size @GL.GLfloat) * 3) (Foreign.plusPtr Foreign.nullPtr (fromIntegral normalsOffset))
+              GL.glVertexAttribPointer 3 2 GL.GL_FLOAT GL.GL_FALSE (fromIntegral (size @GL.GLfloat) * 2) (Foreign.plusPtr Foreign.nullPtr (fromIntegral uvsOffset))
+              GL.glBindBuffer GL.GL_ELEMENT_ARRAY_BUFFER bufferID
+              pure (textureID, ObjMetadata
+                    { vertexArrayID = vertexArrayObjectID
+                    , indexOffset = indicesOffset
+                    , indexCount = fromIntegral (length (objIndices obj))
+                    })
+
+
+  matMap <- sequenceA (Data.Map.Internal.fromSet readTex zigmats)
+  let textureID = fst $ matMap Data.Map.! "pm0263_00_Body1.png"
+
+  -- to render a multimaterial thing, we need to split it up into material meshes
+  -- this is a texture-buffer vao pair. simplest way probably
+  --
+  -- easiest to do this from the base set. filter the triangle sets from the smd by material. yea this is it
+
+  print matMap
 
   let initializeZig = do
         let obj = smdToObj zigzagoon
@@ -846,7 +902,7 @@ main = do
 
         let lightPosition = v3 3 0 2
 
-        Foreign.withArray (flatten (v4 0.1 0.1 0.1 1)) (GL.glUniform4fv ambientLightUniform 1)
+        Foreign.withArray (flatten (v4 0.3 0.3 0.3 1)) (GL.glUniform4fv ambientLightUniform 1)
         Foreign.withArray (flatten lightPosition) (GL.glUniform3fv lightPositionUniform 1)
         Foreign.withArray (flatten (cameraPosition appState . weaken)) (GL.glUniform3fv eyePositionUniform 1)
 
@@ -876,10 +932,15 @@ main = do
         drawTriangulation teapotMetadata (translate (v3 (3) 1 (-8)))
 
         GL.glUseProgram textureShader
-        GL.glActiveTexture GL.GL_TEXTURE0
-        GL.glBindTexture GL.GL_TEXTURE_2D textureID
-        GL.glUniform1i texture_textureUniform 0
-        drawTriangulation zigMetadata (translate (v3 (-2) (-1) (-1)) . rotation 90 (v3 (-1) 0 0))
+        Foreign.withArray (flatten (v4 0.3 0.3 0.3 1)) (GL.glUniform4fv texture_ambientLightUniform 1)
+        Foreign.withArray (flatten lightPosition) (GL.glUniform3fv texture_lightPositionUniform 1)
+        Foreign.withArray (flatten (cameraPosition appState . weaken)) (GL.glUniform3fv texture_eyePositionUniform 1)
+        sequenceA (fmap (\(textureID,zigMetadata) -> do
+            GL.glActiveTexture GL.GL_TEXTURE0
+            GL.glBindTexture GL.GL_TEXTURE_2D textureID
+            GL.glUniform1i texture_textureUniform 0
+            drawTriangulation zigMetadata (translate (v3 (-2) (-1) (-1)) . rotation 45 (v3 0 1 0) . rotation 90 (v3 (-1) 0 0))
+            ) matMap)
 
         unless (timeToQuit appState) (loop appState)
 
