@@ -196,8 +196,65 @@ pSMD =
   MP.eof
   pure (SMD ns sk ts)
 
+smdSkeletonIndices :: SMD -> [(Int,Int)]
+smdSkeletonIndices = filter (\(a,b) -> a /= -1 && b /= -1) . fmap (\(SMD_Node start _ end) -> (start,end)) . nodes
+
+data Rose a = Rose a [Rose a] deriving (Show)
+
+
+roseEdges :: Rose a -> [(Int,Int)]
+roseEdges t = snd (go 0 t)
+  where
+    go :: Int -> Rose a -> (Int, [(Int,Int)])
+    go next (Rose _ cs) =
+      let (next', edges, childIds) =
+            foldl
+              (\(n, es, ids) c ->
+                 let (n', es') = go n c
+                 in (n', es ++ es', ids ++ [n]))
+              (next+1, [], [])
+              cs
+      in ( next' , [(next, cid) | cid <- childIds] ++ edges )
+
+roseVerts (Rose a rs) = a:concatMap roseVerts rs
+
+mapMonoidLookup k m = maybe mempty id (Data.Map.lookup k m)
+
+smdPoses :: SMD -> [Rose (Vec 3)]
+smdPoses smd = do 
+  let childMap = Data.Map.fromListWith (++) ((\(v,k) -> (k,[v])) <$> smdSkeletonIndices smd)
+  frame <- skeleton smd
+  let subtree origin n =
+       let newOrigin = origin + zigscale * pos (bones frame !! n)
+       in Rose newOrigin (subtree newOrigin <$> mapMonoidLookup n childMap)
+  pure (subtree (v3 0 0 0) 0)
+    
+smdPoses' :: SMD -> [Rose (Vec 4)]
+smdPoses' =
+  let go (Rose t ts) = Rose (t (v4 0 0 0 1)) (go <$> ts)
+  in fmap go . smdPoseTransforms
+    
+smdPoseTransforms :: SMD -> [Rose (Vec 4 -> Vec 4)]
+smdPoseTransforms smd = do 
+  let childMap = Data.Map.fromListWith (++) ((\(v,k) -> (k,[v])) <$> smdSkeletonIndices smd)
+  frame <- skeleton smd
+  let subtree transform n =
+       let bone = bones frame !! n
+           newTransform = memo . translate (zigscale * pos bone) . rotation (rot bone z) (v3 0 0 1) . rotation (rot bone y) (v3 0 1 0) . rotation  (rot bone x)(v3 1 0 0) . transform
+       in Rose newTransform (subtree newTransform <$> mapMonoidLookup n childMap)
+  pure (subtree id 0)
+    
+-- practically this should be a tree of vector-vector transformations that transform from some local space into global space
+
+-- so what we wanna do is:
+--   rotate x
+--   rotate y
+--   rotate z
+--   translate
+--   save in node
+--   pass transformation to children
+
 zigscale = 0.03
--- zigscale = 1
 
 smdVertices :: SMD -> [Vertex]
 smdVertices smd = do
@@ -708,7 +765,7 @@ main = do
           vec4 diffuseLight = vec4(brightness,brightness,brightness,1.0);
           vec3 reflectedLightWorldSpace = reflect(-lightVectorWorldSpace,normalWorldSpace);
           vec3 eyeVectorWorldSpace = normalize(eyePosition - vertexPositionWorldSpace);
-          float s = pow(clamp(dot(reflectedLightWorldSpace, eyeVectorWorldSpace),0,1),512);
+          float s = pow(clamp(dot(reflectedLightWorldSpace, eyeVectorWorldSpace),0,1),2048);
           vec4 specularLight = vec4(s,s,s,1.0);
           vec4 lighting = clamp(diffuseLight,0.0,1.0) + ambientLight + clamp(specularLight,0,1);
           fragmentColor = lighting * texture(base_texture,fragment_uv);
@@ -820,12 +877,6 @@ main = do
   matMap <- sequenceA (Data.Map.Internal.fromSet readTex zigmats)
   let textureID = fst $ matMap Data.Map.! "pm0263_00_Body1.png"
 
-  -- to render a multimaterial thing, we need to split it up into material meshes
-  -- this is a texture-buffer vao pair. simplest way probably
-  --
-  -- easiest to do this from the base set. filter the triangle sets from the smd by material. yea this is it
-
-  print matMap
 
   let initializeZig = do
         let obj = smdToObj zigzagoon
@@ -868,6 +919,59 @@ main = do
               })
   
   zigMetadata <- initializeZig
+
+  -- to render a multimaterial thing, we need to split it up into material meshes
+  -- this is a texture-buffer vao pair. simplest way probably
+  --
+  -- easiest to do this from the base set. filter the triangle sets from the smd by material. yea this is it
+
+
+
+  skellyShader <- initShader
+        """#version 430\r\n
+        uniform mat4 modelToProjectionMatrix;
+        in layout(location=0) vec4 vertexPositionModelSpace;
+        void main() {
+          gl_Position = modelToProjectionMatrix * vertexPositionModelSpace;
+        }
+        """
+
+        """#version 430\r\n
+        out vec4 fragmentColor;
+        void main() {
+          fragmentColor = vec4(1,1,1,1);
+        }
+        """
+
+  skelly_modelToProjectionMatrixUniform <-
+     Foreign.C.String.withCString "modelToProjectionMatrix" (GL.glGetUniformLocation skellyShader)
+
+  skelly <- do
+        let pose = head (smdPoses' zigzagoon)
+        let verts = flatten $ roseVerts pose
+        let indices = fmap fromIntegral (foldr (\(a,b) -> ([a,b]++)) [] (roseEdges pose)) :: [GL.GLushort]
+        let vertsOffset = 0
+        let indicesOffset = bufferSize verts
+        bufferID <- Foreign.alloca $ \bufferIDPtr -> do
+            GL.glGenBuffers 1 bufferIDPtr
+            Foreign.peek bufferIDPtr
+        GL.glBindBuffer GL.GL_ARRAY_BUFFER bufferID
+        GL.glBufferData GL.GL_ARRAY_BUFFER (bufferSize verts + bufferSize indices) Foreign.nullPtr GL.GL_STATIC_DRAW
+        Foreign.withArray verts         (GL.glBufferSubData GL.GL_ARRAY_BUFFER vertsOffset   (bufferSize verts))
+        Foreign.withArray indices       (GL.glBufferSubData GL.GL_ARRAY_BUFFER indicesOffset (bufferSize indices))
+        vertexArrayObjectID <- Foreign.alloca $ \idPtr -> do
+            GL.glGenVertexArrays 1 idPtr
+            Foreign.peek idPtr
+        GL.glBindVertexArray vertexArrayObjectID
+        GL.glEnableVertexAttribArray 0
+        GL.glBindBuffer GL.GL_ARRAY_BUFFER bufferID
+        GL.glVertexAttribPointer 0 4 GL.GL_FLOAT GL.GL_FALSE (fromIntegral (size @GL.GLfloat) * 4) (Foreign.plusPtr Foreign.nullPtr (fromIntegral 0))
+        GL.glBindBuffer GL.GL_ELEMENT_ARRAY_BUFFER bufferID
+        pure (ObjMetadata
+              { vertexArrayID = vertexArrayObjectID
+              , indexOffset = indicesOffset
+              , indexCount = fromIntegral (length indices)
+              })
 
 
   --- MAIN LOOP ----------------------------------------------------------------
@@ -941,6 +1045,19 @@ main = do
             GL.glUniform1i texture_textureUniform 0
             drawTriangulation zigMetadata (translate (v3 (-2) (-1) (-1)) . rotation 45 (v3 0 1 0) . rotation 90 (v3 (-1) 0 0))
             ) matMap)
+
+        GL.glClear GL.GL_DEPTH_BUFFER_BIT
+        GL.glUseProgram skellyShader
+        GL.glBindVertexArray (vertexArrayID skelly)
+        Foreign.withArray
+          (toScreenspace (translate (v3 (-2) (-1) (-1)) . rotation 45 (v3 0 1 0) . rotation 90 (v3 (-1) 0 0)))
+          (GL.glUniformMatrix4fv skelly_modelToProjectionMatrixUniform 1 0)
+        GL.glDrawElements
+          GL.GL_LINES
+          (indexCount skelly)
+          GL.GL_UNSIGNED_SHORT
+          (Foreign.plusPtr Foreign.nullPtr (fromIntegral (indexOffset skelly)))
+        
 
         unless (timeToQuit appState) (loop appState)
 
