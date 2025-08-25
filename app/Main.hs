@@ -220,17 +220,8 @@ roseVerts (Rose a rs) = a:concatMap roseVerts rs
 
 mapMonoidLookup k m = maybe mempty id (Data.Map.lookup k m)
 
-smdPoses :: SMD -> [Rose (Vec 3)]
-smdPoses smd = do 
-  let childMap = Data.Map.fromListWith (++) ((\(v,k) -> (k,[v])) <$> smdSkeletonIndices smd)
-  frame <- skeleton smd
-  let subtree origin n =
-       let newOrigin = origin + zigscale * pos (bones frame !! n)
-       in Rose newOrigin (subtree newOrigin <$> mapMonoidLookup n childMap)
-  pure (subtree (v3 0 0 0) 0)
-    
-smdPoses' :: SMD -> [Rose (Vec 4)]
-smdPoses' =
+smdPoses :: SMD -> [Rose (Vec 4)]
+smdPoses =
   let go (Rose t ts) = Rose (t (v4 0 0 0 1)) (go <$> ts)
   in fmap go . smdPoseTransforms
     
@@ -240,7 +231,13 @@ smdPoseTransforms smd = do
   frame <- skeleton smd
   let subtree transform n =
        let bone = bones frame !! n
-           newTransform = memo . translate (zigscale * pos bone) . rotation (rot bone z) (v3 0 0 1) . rotation (rot bone y) (v3 0 1 0) . rotation  (rot bone x)(v3 1 0 0) . transform
+           newTransform =
+               transform
+               . memo
+               . translate (zigscale * pos bone)
+               . rotation (180/pi * rot bone z) (v3 0 0 1)
+               . rotation (180/pi * rot bone y) (v3 0 1 0)
+               . rotation (180/pi * rot bone x) (v3 1 0 0)
        in Rose newTransform (subtree newTransform <$> mapMonoidLookup n childMap)
   pure (subtree id 0)
     
@@ -927,6 +924,8 @@ main = do
 
 
 
+
+
   skellyShader <- initShader
         """#version 430\r\n
         uniform mat4 modelToProjectionMatrix;
@@ -947,7 +946,7 @@ main = do
      Foreign.C.String.withCString "modelToProjectionMatrix" (GL.glGetUniformLocation skellyShader)
 
   skelly <- do
-        let pose = head (smdPoses' zigzagoon)
+        let pose = head (smdPoses zigzagoon)
         let verts = flatten $ roseVerts pose
         let indices = fmap fromIntegral (foldr (\(a,b) -> ([a,b]++)) [] (roseEdges pose)) :: [GL.GLushort]
         let vertsOffset = 0
