@@ -54,12 +54,6 @@ v2 :: Float -> Float -> Vec 2;                   v2 x y i = case i of {0->x;1->y
 v3 :: Float -> Float -> Float -> Vec 3;          v3 x y z i = case i of {0->x;1->y;2->z}
 v4 :: Float -> Float -> Float -> Float -> Vec 4; v4 x y z w i = case i of {0->x;1->y;2->z;3->w}
 
-class Flatten a where flatten :: a -> [GL.GLfloat]
-instance KnownNat n => Flatten (Vec n) where flatten v = v <$> finites
-instance (KnownNat m, KnownNat n) => Flatten (Mat m n) where flatten m = flip m <$> finites <*> finites
-instance Flatten Vertex where flatten vertex = flatten (position vertex) ++ flatten (color vertex)
-instance Flatten a => Flatten [a] where flatten = concatMap flatten
-
 instance KnownNat n => Show (Vec n) where show v = "v" ++ show (1+fromIntegral (maxBound :: Finite n)) ++ show (v <$> finites)
 
 instance Num (Vec n) where
@@ -148,6 +142,38 @@ data SMD_Vertex = SMD_Vertex
 data SMD_Triangle = SMD_Triangle { material :: String, verts :: (SMD_Vertex,SMD_Vertex,SMD_Vertex) } deriving (Show)
 data SMD = SMD { nodes :: [SMD_Node], skeleton :: [SMD_SkeletonFrame], triangles :: [SMD_Triangle] } deriving (Show)
 
+smdscale factor smd =
+  let vscale v = v {vPos = factor * vPos v}
+      triscale t = let (a,b,c) = verts t in t {verts = (vscale a, vscale b, vscale c)}
+      bonescale b = b {pos = factor * pos b}
+      framescale f = f {bones = bonescale <$> bones f}
+  in smd {triangles = triscale <$> triangles smd, skeleton = framescale <$> skeleton smd}
+
+pAnim :: Parser [SMD_SkeletonFrame]
+pAnim =
+  let sc            = L.space C.space1 empty empty                                  :: Parser ()              
+      lexeme        = L.lexeme sc                                                   :: Parser a -> Parser a
+      integer       = lexeme (L.signed sc L.decimal)                                :: Parser Int             
+      float         = lexeme (L.signed sc L.float)                                  :: Parser Float           
+      symbol        = L.symbol sc                                                   :: String -> Parser String
+      stringLiteral = lexeme (C.char '"' *> MP.manyTill L.charLiteral (C.char '"')) :: Parser String          
+  in do
+  symbol "version" >> integer
+  symbol "nodes" >> MP.manyTill (lexeme (SMD_Node <$> integer <*> stringLiteral <*> integer)) (symbol "end")     
+  sk <-
+     symbol "skeleton" >>
+     MP.manyTill
+        (symbol "time" >> SMD_SkeletonFrame <$>
+         integer <*>
+         MP.many (lexeme (SMD_BoneFrame <$>
+             integer <*>
+             (v3 <$> float <*> float <*> float) <*>
+             (v3 <$> float <*> float <*> float))))
+     (symbol "end")
+  MP.eof
+  pure sk
+
+
 pSMD :: Parser SMD
 pSMD =
   let sc            = L.space C.space1 empty empty                                        :: Parser ()              
@@ -234,12 +260,18 @@ smdPoseTransforms smd = do
            newTransform =
                transform
                . memo
-               . translate (zigscale * pos bone)
+               . translate (pos bone)
                . rotation (180/pi * rot bone z) (v3 0 0 1)
                . rotation (180/pi * rot bone y) (v3 0 1 0)
                . rotation (180/pi * rot bone x) (v3 1 0 0)
        in Rose newTransform (subtree newTransform <$> mapMonoidLookup n childMap)
   pure (subtree id 0)
+
+               -- rotation (-180/pi * rot bone x) (v3 1 0 0)
+               -- . rotation (-180/pi * rot bone y) (v3 0 1 0)
+               -- . rotation (-180/pi * rot bone z) (v3 0 0 1)
+               -- . translate (-pos bone)
+               -- . transform
     
 -- practically this should be a tree of vector-vector transformations that transform from some local space into global space
 
@@ -253,12 +285,12 @@ smdPoseTransforms smd = do
 
 zigscale = 0.03
 
-smdVertices :: SMD -> [Vertex]
+smdVertices :: SMD -> [OBJ_Vertex]
 smdVertices smd = do
   (va,vb,vc) <- verts <$> triangles smd
-  [  Vertex (zigscale * vPos va) (v3 1 1 1)
-   , Vertex (zigscale * vPos vb) (v3 1 1 1)
-   , Vertex (zigscale * vPos vc) (v3 1 1 1)
+  [  OBJ_Vertex (vPos va) (v3 1 1 1)
+   , OBJ_Vertex (vPos vb) (v3 1 1 1)
+   , OBJ_Vertex (vPos vc) (v3 1 1 1)
    ]
 
 smdFaces :: SMD -> [Face]
@@ -292,8 +324,8 @@ smdMats = Data.Set.fromList . fmap material . triangles
 
 type Parser = MP.Parsec Void String
 type Face = (Int, Int, Int)
-data Vertex = Vertex {position :: Vec 3, color :: Vec 3} deriving Show
-data Obj = Obj { vertices :: [Vertex], faces :: [Face] } deriving Show
+data OBJ_Vertex = OBJ_Vertex {position :: Vec 3, color :: Vec 3} deriving Show
+data Obj = Obj { vertices :: [OBJ_Vertex], faces :: [Face] } deriving Show
 
 pObj :: Parser Obj
 pObj =
@@ -303,7 +335,7 @@ pObj =
     vertexLine :: Parser (Obj -> Obj) = do
       C.char 'v'
       v <- v3 <$> (hspace1 >> float) <*> (hspace1 >> float) <*> (hspace1 >> float)
-      return (\o -> o { vertices = Vertex v (v3 1 1 1):vertices o })
+      return (\o -> o { vertices = OBJ_Vertex v (v3 1 1 1):vertices o })
     faceLine :: Parser (Obj -> Obj)= do
       C.char 'f'
       a <- hspace1 >> L.decimal
@@ -332,11 +364,11 @@ normals obj =
       summed   = Data.Array.accum (+) base updates
   in map normalize (Data.Array.elems summed)
 
-normalModel :: Obj -> [Vertex]
+normalModel :: Obj -> [OBJ_Vertex]
 normalModel obj = do
   (normal,vert) <- zip (normals obj) (vertices obj)
-  [ Vertex { position = position vert, color = v3 1 1 1 }
-    , Vertex { position = position vert + 0.3 * normal, color = v3 1 1 1 }
+  [ OBJ_Vertex { position = position vert, color = v3 1 1 1 }
+    , OBJ_Vertex { position = position vert + 0.3 * normal, color = v3 1 1 1 }
     ]
 
 objBufferSize obj = bufferSize (objVerts obj) + bufferSize (objIndices obj)
@@ -353,30 +385,30 @@ pyramidIndices = objIndices pyramidObj
 
 cubeObj = Obj
   { vertices =
-    [ Vertex {position =  v3 (-1) ( 1.0) ( 1.0), color = v3 1 0.0 0.0}
-    , Vertex {position =  v3 ( 1) ( 1.0) ( 1.0), color = v3 0 1.0 0.0}
-    , Vertex {position =  v3 ( 1) ( 1.0) (-1.0), color = v3 0 0.0 1.0}
-    , Vertex {position =  v3 (-1) ( 1.0) (-1.0), color = v3 1 1.0 1.0}
-    , Vertex {position =  v3 (-1) ( 1.0) (-1.0), color = v3 1 0.0 1.0}
-    , Vertex {position =  v3 ( 1) ( 1.0) (-1.0), color = v3 0 0.5 0.2}
-    , Vertex {position =  v3 ( 1) (-1.0) (-1.0), color = v3 0 0.6 0.4}
-    , Vertex {position =  v3 (-1) (-1.0) (-1.0), color = v3 0 1.0 0.5}
-    , Vertex {position =  v3 ( 1) ( 1.0) (-1.0), color = v3 0 0.5 0.2}
-    , Vertex {position =  v3 ( 1) ( 1.0) ( 1.0), color = v3 0 0.3 0.7}
-    , Vertex {position =  v3 ( 1) (-1.0) ( 1.0), color = v3 0 0.7 1.0}
-    , Vertex {position =  v3 ( 1) (-1.0) (-1.0), color = v3 0 0.7 0.5}
-    , Vertex {position =  v3 (-1) ( 1.0) ( 1.0), color = v3 0 0.8 0.2}
-    , Vertex {position =  v3 (-1) ( 1.0) (-1.0), color = v3 0 0.7 0.3}
-    , Vertex {position =  v3 (-1) (-1.0) (-1.0), color = v3 0 0.7 0.7}
-    , Vertex {position =  v3 (-1) (-1.0) ( 1.0), color = v3 0 0.5 1.0}
-    , Vertex {position =  v3 ( 1) ( 1.0) ( 1.0), color = v3 0 1.0 0.7}
-    , Vertex {position =  v3 (-1) ( 1.0) ( 1.0), color = v3 0 0.4 0.8}
-    , Vertex {position =  v3 (-1) (-1.0) ( 1.0), color = v3 0 0.8 0.7}
-    , Vertex {position =  v3 ( 1) (-1.0) ( 1.0), color = v3 0 0.7 1.0}
-    , Vertex {position =  v3 ( 1) (-1.0) (-1.0), color = v3 0 0.3 0.7}
-    , Vertex {position =  v3 (-1) (-1.0) (-1.0), color = v3 0 0.9 0.5}
-    , Vertex {position =  v3 (-1) (-1.0) ( 1.0), color = v3 0 0.8 0.5}
-    , Vertex {position =  v3 ( 1) (-1.0) ( 1.0), color = v3 0 1.0 0.2}
+    [ OBJ_Vertex {position =  v3 (-1) ( 1.0) ( 1.0), color = v3 1 0.0 0.0}
+    , OBJ_Vertex {position =  v3 ( 1) ( 1.0) ( 1.0), color = v3 0 1.0 0.0}
+    , OBJ_Vertex {position =  v3 ( 1) ( 1.0) (-1.0), color = v3 0 0.0 1.0}
+    , OBJ_Vertex {position =  v3 (-1) ( 1.0) (-1.0), color = v3 1 1.0 1.0}
+    , OBJ_Vertex {position =  v3 (-1) ( 1.0) (-1.0), color = v3 1 0.0 1.0}
+    , OBJ_Vertex {position =  v3 ( 1) ( 1.0) (-1.0), color = v3 0 0.5 0.2}
+    , OBJ_Vertex {position =  v3 ( 1) (-1.0) (-1.0), color = v3 0 0.6 0.4}
+    , OBJ_Vertex {position =  v3 (-1) (-1.0) (-1.0), color = v3 0 1.0 0.5}
+    , OBJ_Vertex {position =  v3 ( 1) ( 1.0) (-1.0), color = v3 0 0.5 0.2}
+    , OBJ_Vertex {position =  v3 ( 1) ( 1.0) ( 1.0), color = v3 0 0.3 0.7}
+    , OBJ_Vertex {position =  v3 ( 1) (-1.0) ( 1.0), color = v3 0 0.7 1.0}
+    , OBJ_Vertex {position =  v3 ( 1) (-1.0) (-1.0), color = v3 0 0.7 0.5}
+    , OBJ_Vertex {position =  v3 (-1) ( 1.0) ( 1.0), color = v3 0 0.8 0.2}
+    , OBJ_Vertex {position =  v3 (-1) ( 1.0) (-1.0), color = v3 0 0.7 0.3}
+    , OBJ_Vertex {position =  v3 (-1) (-1.0) (-1.0), color = v3 0 0.7 0.7}
+    , OBJ_Vertex {position =  v3 (-1) (-1.0) ( 1.0), color = v3 0 0.5 1.0}
+    , OBJ_Vertex {position =  v3 ( 1) ( 1.0) ( 1.0), color = v3 0 1.0 0.7}
+    , OBJ_Vertex {position =  v3 (-1) ( 1.0) ( 1.0), color = v3 0 0.4 0.8}
+    , OBJ_Vertex {position =  v3 (-1) (-1.0) ( 1.0), color = v3 0 0.8 0.7}
+    , OBJ_Vertex {position =  v3 ( 1) (-1.0) ( 1.0), color = v3 0 0.7 1.0}
+    , OBJ_Vertex {position =  v3 ( 1) (-1.0) (-1.0), color = v3 0 0.3 0.7}
+    , OBJ_Vertex {position =  v3 (-1) (-1.0) (-1.0), color = v3 0 0.9 0.5}
+    , OBJ_Vertex {position =  v3 (-1) (-1.0) ( 1.0), color = v3 0 0.8 0.5}
+    , OBJ_Vertex {position =  v3 ( 1) (-1.0) ( 1.0), color = v3 0 1.0 0.2}
     ]
   , faces =
       [ (0,   1,  2), ( 0,  2,  3) -- Top
@@ -392,23 +424,23 @@ cubeNormalIndices :: [GL.GLushort]
 cubeNormalIndices = [0..fromIntegral (length cubeNormalVerts')-1]
 cubeNormalVerts :: [GL.GLfloat]
 cubeNormalVerts = flatten cubeNormalVerts'  
-cubeNormalVerts' :: [Vertex]
+cubeNormalVerts' :: [OBJ_Vertex]
 cubeNormalVerts' = normalModel cubeObj  
 
 pyramidObj = Obj
   { vertices = 
-    [ Vertex {position = v3 1 1 (-1), color = v3 1 0 0}
-    , Vertex {position = v3 1 1 (-1), color = v3 1 0 0}
-    , Vertex {position = v3 1 1 (-1), color = v3 1 0 0}
-    , Vertex {position = v3 (-1) 1 1, color = v3 0 1 0}
-    , Vertex {position = v3 (-1) 1 1, color = v3 0 1 0}
-    , Vertex {position = v3 (-1) 1 1, color = v3 0 1 0}
-    , Vertex {position = v3 (-1) (-1) (-1), color = v3 0 0 1}
-    , Vertex {position = v3 (-1) (-1) (-1), color = v3 0 0 1}
-    , Vertex {position = v3 (-1) (-1) (-1), color = v3 0 0 1}
-    , Vertex {position = v3 1 (-1) 1, color = v3 0.7 0.6 0.6}
-    , Vertex {position = v3 1 (-1) 1, color = v3 0.7 0.6 0.6}
-    , Vertex {position = v3 1 (-1) 1, color = v3 0.7 0.6 0.6}
+    [ OBJ_Vertex {position = v3 1 1 (-1), color = v3 1 0 0}
+    , OBJ_Vertex {position = v3 1 1 (-1), color = v3 1 0 0}
+    , OBJ_Vertex {position = v3 1 1 (-1), color = v3 1 0 0}
+    , OBJ_Vertex {position = v3 (-1) 1 1, color = v3 0 1 0}
+    , OBJ_Vertex {position = v3 (-1) 1 1, color = v3 0 1 0}
+    , OBJ_Vertex {position = v3 (-1) 1 1, color = v3 0 1 0}
+    , OBJ_Vertex {position = v3 (-1) (-1) (-1), color = v3 0 0 1}
+    , OBJ_Vertex {position = v3 (-1) (-1) (-1), color = v3 0 0 1}
+    , OBJ_Vertex {position = v3 (-1) (-1) (-1), color = v3 0 0 1}
+    , OBJ_Vertex {position = v3 1 (-1) 1, color = v3 0.7 0.6 0.6}
+    , OBJ_Vertex {position = v3 1 (-1) 1, color = v3 0.7 0.6 0.6}
+    , OBJ_Vertex {position = v3 1 (-1) 1, color = v3 0.7 0.6 0.6}
     ]
   , faces =
     [ (0,6,3)
@@ -422,7 +454,7 @@ pyramidNormalIndices :: [GL.GLushort]
 pyramidNormalIndices = [0..fromIntegral (length pyramidNormalVerts')-1]
 pyramidNormalVerts :: [GL.GLfloat]
 pyramidNormalVerts = flatten pyramidNormalVerts'  
-pyramidNormalVerts' :: [Vertex]
+pyramidNormalVerts' :: [OBJ_Vertex]
 pyramidNormalVerts' = normalModel pyramidObj  
 
 squareIndices tl tr bl br = [(tl,bl,tr),(br,tr,bl)]
@@ -445,7 +477,7 @@ planeObj = Obj
     let y = fromIntegral (i `div` planeHeight)
     let intPairInject y = let t n = if n<0 then -2*n-1 else 2*n; a=t i; b=t (seed+y) in (a+b)*(a+b+1)`div`2+b
     let randColor idx = (fst (System.Random.uniformR (0,1) (System.Random.mkStdGen (intPairInject idx))))
-    pure (Vertex
+    pure (OBJ_Vertex
         { position = v3 (x - fromIntegral planeWidth / 2) 0 (y - fromIntegral planeHeight / 2)
         , color = v3 (randColor 0) (randColor 1) (randColor 2)
         })
@@ -459,7 +491,7 @@ planeNormalIndices :: [GL.GLushort]
 planeNormalIndices = [0..fromIntegral (length planeNormalVerts')-1]
 planeNormalVerts :: [GL.GLfloat]
 planeNormalVerts = flatten planeNormalVerts'  
-planeNormalVerts' :: [Vertex]
+planeNormalVerts' :: [OBJ_Vertex]
 planeNormalVerts' = normalModel planeObj  
 
 
@@ -543,6 +575,123 @@ moveDown =
    moveCamera (v4 0 (-1) 0 1) -- or v4 0 (-1) 0 1 = l - j
 
 data ObjMetadata = ObjMetadata { vertexArrayID :: GL.GLuint, indexCount :: GL.GLsizei, indexOffset :: GL.GLintptr } deriving Show
+
+
+
+
+data a :& b = a :& b deriving Show
+
+instance (Flatten a, Flatten b) => Flatten (a :& b) where flatten (a :& b) = flatten a ++ flatten b
+instance (Vertex a, Vertex b) => Vertex (a :& b) where layout = layout @a ++ layout @b
+
+instance KnownNat n => Vertex (Vec n) where layout = [fromIntegral (maxBound :: Finite n)+1]
+
+class Flatten v => Vertex v where layout :: [Int]
+
+vertexSize :: forall v i.(Vertex v,Integral i) => i
+vertexSize = fromIntegral (size @GL.GLfloat * sum (layout @v))
+
+instance Flatten SMD_Vertex where flatten v = flatten (vPos v) ++ flatten (vNormal v) ++ flatten (vUV v)
+instance Vertex SMD_Vertex where layout = [3,3,2]
+
+class Flatten a where flatten :: a -> [GL.GLfloat]
+instance KnownNat n => Flatten (Vec n) where flatten v = v <$> finites
+instance (KnownNat m, KnownNat n) => Flatten (Mat m n) where flatten m = flip m <$> finites <*> finites
+instance Flatten a => Flatten [a] where flatten = concatMap flatten
+
+instance Flatten OBJ_Vertex where flatten vertex = flatten (position vertex) ++ flatten (color vertex)
+instance Vertex OBJ_Vertex where layout = [3,3]
+
+genTriBuffer :: forall v i.(Vertex v, Integral i) => [(i,i,i)] -> [v] -> IO ObjMetadata
+genTriBuffer indices verts = do
+
+  vertexArrayObjectID <- Foreign.alloca $ \idPtr -> do
+      GL.glGenVertexArrays 1 idPtr
+      Foreign.peek idPtr
+  GL.glBindVertexArray vertexArrayObjectID
+
+  Foreign.alloca $ \indexBufferIDPtr -> do
+      GL.glGenBuffers 1 indexBufferIDPtr
+      indexBufferID <- Foreign.peek indexBufferIDPtr
+      GL.glBindBuffer GL.GL_ELEMENT_ARRAY_BUFFER indexBufferID
+      let indexBufferContent :: [GL.GLushort] = concatMap (\(a,b,c) -> fromIntegral <$> [a,b,c]) indices
+      let indexBufferSize = fromIntegral (size @GL.GLushort * length indexBufferContent)
+      Foreign.withArray indexBufferContent (flip (GL.glBufferData GL.GL_ELEMENT_ARRAY_BUFFER indexBufferSize) GL.GL_STATIC_DRAW)
+
+  Foreign.alloca $ \vertexBufferIDPtr -> do
+      GL.glGenBuffers 1 vertexBufferIDPtr
+      vertexBufferID <- Foreign.peek vertexBufferIDPtr
+      GL.glBindBuffer GL.GL_ARRAY_BUFFER vertexBufferID
+      let vertexBufferContent = flatten verts
+      let vertexBufferSize = fromIntegral (size @GL.GLfloat * length vertexBufferContent)
+      Foreign.withArray vertexBufferContent (flip (GL.glBufferData GL.GL_ARRAY_BUFFER vertexBufferSize) GL.GL_STATIC_DRAW)
+
+  
+  let bufferData l = zip [0..] (zip (scanl (+) 0 l) l)
+  let attribs = bufferData (layout @v)
+  mapM (\(index,(bufferOffset,attributeSize)) -> do
+      GL.glEnableVertexAttribArray index
+      GL.glVertexAttribPointer
+         index
+         (fromIntegral attributeSize)
+         GL.GL_FLOAT
+         GL.GL_FALSE
+         (vertexSize @v)
+         (Foreign.plusPtr Foreign.nullPtr (bufferOffset * size @GL.GLfloat))
+    ) attribs
+
+  pure (ObjMetadata
+        { vertexArrayID = vertexArrayObjectID
+        , indexOffset = 0
+        , indexCount = fromIntegral (3 * length indices)
+        })
+
+
+genLineBuffer :: forall v i.(Vertex v, Integral i) => [(i,i)] -> [v] -> IO ObjMetadata
+genLineBuffer indices verts = do
+
+  vertexArrayObjectID <- Foreign.alloca $ \idPtr -> do
+      GL.glGenVertexArrays 1 idPtr
+      Foreign.peek idPtr
+  GL.glBindVertexArray vertexArrayObjectID
+
+  Foreign.alloca $ \indexBufferIDPtr -> do
+      GL.glGenBuffers 1 indexBufferIDPtr
+      indexBufferID <- Foreign.peek indexBufferIDPtr
+      GL.glBindBuffer GL.GL_ELEMENT_ARRAY_BUFFER indexBufferID
+      let indexBufferContent :: [GL.GLushort] = concatMap (\(a,b) -> fromIntegral <$> [a,b]) indices
+      let indexBufferSize = fromIntegral (size @GL.GLuint * length indexBufferContent)
+      Foreign.withArray indexBufferContent (flip (GL.glBufferData GL.GL_ELEMENT_ARRAY_BUFFER indexBufferSize) GL.GL_STATIC_DRAW)
+
+  Foreign.alloca $ \vertexBufferIDPtr -> do
+      GL.glGenBuffers 1 vertexBufferIDPtr
+      vertexBufferID <- Foreign.peek vertexBufferIDPtr
+      GL.glBindBuffer GL.GL_ARRAY_BUFFER vertexBufferID
+      let vertexBufferContent = flatten verts
+      let vertexBufferSize = fromIntegral (size @GL.GLfloat * length vertexBufferContent)
+      Foreign.withArray vertexBufferContent (flip (GL.glBufferData GL.GL_ARRAY_BUFFER vertexBufferSize) GL.GL_STATIC_DRAW)
+
+  
+  let bufferData l = zip [0..] (zip (scanl (+) 0 l) l)
+  let attribs = bufferData (layout @v)
+  mapM (\(index,(bufferOffset,attributeSize)) -> do
+      GL.glEnableVertexAttribArray index
+      GL.glVertexAttribPointer
+         index
+         (fromIntegral attributeSize)
+         GL.GL_FLOAT
+         GL.GL_FALSE
+         (vertexSize @v)
+         (Foreign.plusPtr Foreign.nullPtr (bufferOffset * size @GL.GLfloat))
+    ) attribs
+
+  pure (ObjMetadata
+        { vertexArrayID = vertexArrayObjectID
+        , indexOffset = 0
+        , indexCount = fromIntegral (2 * length indices)
+        })
+
+
 
 main :: IO ()
 main = do
@@ -681,40 +830,8 @@ main = do
 
   --- SEND DATA TO GPU ---------------------------------------------------------
 
-  let initializeObject obj = do
-        let verts = objVerts obj
-        let indices = objIndices obj
-        let vertexNormals = flatten (normals obj)
-        let objBufferSize obj = bufferSize verts + bufferSize indices + bufferSize vertexNormals
-        let vertsStride = fromIntegral (size @GL.GLfloat) * 6
-        let vertsOffset = 0
-        let indicesOffset = bufferSize verts
-        let normalsOffset = indicesOffset + bufferSize indices
-        bufferID <- Foreign.alloca $ \bufferIDPtr -> do
-            GL.glGenBuffers 1 bufferIDPtr
-            Foreign.peek bufferIDPtr
-        GL.glBindBuffer GL.GL_ARRAY_BUFFER bufferID
-        GL.glBufferData GL.GL_ARRAY_BUFFER (objBufferSize obj) Foreign.nullPtr GL.GL_STATIC_DRAW
-        Foreign.withArray verts         (GL.glBufferSubData GL.GL_ARRAY_BUFFER vertsOffset   (bufferSize verts))
-        Foreign.withArray indices       (GL.glBufferSubData GL.GL_ARRAY_BUFFER indicesOffset (bufferSize indices))
-        Foreign.withArray vertexNormals (GL.glBufferSubData GL.GL_ARRAY_BUFFER normalsOffset (bufferSize vertexNormals))
-        vertexArrayObjectID <- Foreign.alloca $ \idPtr -> do
-            GL.glGenVertexArrays 1 idPtr
-            Foreign.peek idPtr
-        GL.glBindVertexArray vertexArrayObjectID
-        GL.glEnableVertexAttribArray 0
-        GL.glEnableVertexAttribArray 1
-        GL.glEnableVertexAttribArray 2
-        GL.glBindBuffer GL.GL_ARRAY_BUFFER bufferID
-        GL.glVertexAttribPointer 0 3 GL.GL_FLOAT GL.GL_FALSE vertsStride (Foreign.plusPtr Foreign.nullPtr (fromIntegral 0))
-        GL.glVertexAttribPointer 1 3 GL.GL_FLOAT GL.GL_FALSE vertsStride (Foreign.plusPtr Foreign.nullPtr (fromIntegral 0 + 3*size @GL.GLfloat))
-        GL.glVertexAttribPointer 2 3 GL.GL_FLOAT GL.GL_FALSE (fromIntegral (size @GL.GLfloat) * 3) (Foreign.plusPtr Foreign.nullPtr (fromIntegral normalsOffset))
-        GL.glBindBuffer GL.GL_ELEMENT_ARRAY_BUFFER bufferID
-        pure (ObjMetadata
-              { vertexArrayID = vertexArrayObjectID
-              , indexOffset = indicesOffset
-              , indexCount = fromIntegral (length (objIndices obj))
-              })
+  let initializeObject obj = genTriBuffer (faces obj) (zipWith (:&) (vertices obj) (normals obj))
+        
   
   cubeMetadata <- initializeObject cubeObj
   pyramidMetadata <- initializeObject pyramidObj
@@ -722,20 +839,13 @@ main = do
   teapotMetadata <- initializeObject teapotObj
 
 
-
-
-
-
-
-
   textureShader <- initShader 
         """#version 430\r\n
         uniform mat4 modelToProjectionMatrix;
         uniform mat4 modelToWorldTransformMatrix;
         in layout(location=0) vec4 vertexPositionModelSpace;
-        in layout(location=1) vec3 vertexColor;
-        in layout(location=2) vec3 normalModelSpace;
-        in layout(location=3) vec2 vertex_uv;
+        in layout(location=1) vec3 normalModelSpace;
+        in layout(location=2) vec2 vertex_uv;
         out vec3 normalWorldSpace;
         out vec2 fragment_uv;
         out vec3 vertexPositionWorldSpace;
@@ -783,12 +893,25 @@ main = do
      Foreign.C.String.withCString "base_texture" (GL.glGetUniformLocation textureShader)
 
 
-  zigzagoon <- do
+  zigzagoon' <- do
     let filename = "resources/Zigzagoon/Zigzagoon.SMD"
     src <- readFile filename
     case MP.parse pSMD filename src of
       Left err -> print err >> System.Exit.exitFailure
       Right model -> pure model
+
+  ziganim <- do
+    let filename = "resources/Zigzagoon/anims/Action.smd"
+    src <- readFile filename
+    case MP.parse pAnim filename src of
+      Left err -> print err >> System.Exit.exitFailure
+      Right model -> pure model
+
+  let zigzagoon = smdscale zigscale (zigzagoon' {skeleton = ziganim})
+
+  -- we should figure out how to deform the skeleton first! then apply the basic principles from that simple situation to the model itself
+
+  print ziganim
 
   let zigmats = smdMats zigzagoon
 
@@ -831,99 +954,14 @@ main = do
               GL.glGenerateMipmap GL.GL_TEXTURE_2D
 
               let smd = zigzagoon {triangles = filter (\v -> material v == matName) (triangles zigzagoon)}
-              let obj = smdToObj smd
-              let verts = objVerts obj
-              let indices = objIndices obj
-              let normals = flatten (smdNormals smd)
-              let uvs = flatten (smdUVs smd)
-              let objBufferSize obj = bufferSize verts + bufferSize indices + bufferSize normals + bufferSize uvs
-              let vertsOffset = 0
-              let indicesOffset = bufferSize verts
-              let normalsOffset = indicesOffset + bufferSize indices
-              let uvsOffset = normalsOffset + bufferSize normals
-              bufferID <- Foreign.alloca $ \bufferIDPtr -> do
-                  GL.glGenBuffers 1 bufferIDPtr
-                  Foreign.peek bufferIDPtr
-              GL.glBindBuffer GL.GL_ARRAY_BUFFER bufferID
-              GL.glBufferData GL.GL_ARRAY_BUFFER (objBufferSize obj) Foreign.nullPtr GL.GL_STATIC_DRAW
-              Foreign.withArray verts   (GL.glBufferSubData GL.GL_ARRAY_BUFFER vertsOffset   (bufferSize verts))
-              Foreign.withArray indices (GL.glBufferSubData GL.GL_ARRAY_BUFFER indicesOffset (bufferSize indices))
-              Foreign.withArray normals (GL.glBufferSubData GL.GL_ARRAY_BUFFER normalsOffset (bufferSize normals))
-              Foreign.withArray uvs     (GL.glBufferSubData GL.GL_ARRAY_BUFFER uvsOffset     (bufferSize uvs))
-              vertexArrayObjectID <- Foreign.alloca $ \idPtr -> do
-                  GL.glGenVertexArrays 1 idPtr
-                  Foreign.peek idPtr
-              GL.glBindVertexArray vertexArrayObjectID
-              GL.glEnableVertexAttribArray 0
-              GL.glEnableVertexAttribArray 1
-              GL.glEnableVertexAttribArray 2
-              GL.glEnableVertexAttribArray 3
-              GL.glBindBuffer GL.GL_ARRAY_BUFFER bufferID
-              GL.glVertexAttribPointer 0 3 GL.GL_FLOAT GL.GL_FALSE (fromIntegral (size @GL.GLfloat) * 6) (Foreign.plusPtr Foreign.nullPtr (fromIntegral 0))
-              GL.glVertexAttribPointer 1 3 GL.GL_FLOAT GL.GL_FALSE (fromIntegral (size @GL.GLfloat) * 6) (Foreign.plusPtr Foreign.nullPtr (fromIntegral 0 + 3*size @GL.GLfloat))
-              GL.glVertexAttribPointer 2 3 GL.GL_FLOAT GL.GL_FALSE (fromIntegral (size @GL.GLfloat) * 3) (Foreign.plusPtr Foreign.nullPtr (fromIntegral normalsOffset))
-              GL.glVertexAttribPointer 3 2 GL.GL_FLOAT GL.GL_FALSE (fromIntegral (size @GL.GLfloat) * 2) (Foreign.plusPtr Foreign.nullPtr (fromIntegral uvsOffset))
-              GL.glBindBuffer GL.GL_ELEMENT_ARRAY_BUFFER bufferID
-              pure (textureID, ObjMetadata
-                    { vertexArrayID = vertexArrayObjectID
-                    , indexOffset = indicesOffset
-                    , indexCount = fromIntegral (length (objIndices obj))
-                    })
-
+              let smdTris = fmap (\n -> (3*n,3*n+1,3*n+2)) [0..length (triangles smd) - 1]
+              let smdVerts = concatMap (\v -> let (a,b,c) = verts v in [a,b,c]) (triangles smd)
+              md <- genTriBuffer smdTris smdVerts
+              pure (textureID,md)
+  
 
   matMap <- sequenceA (Data.Map.Internal.fromSet readTex zigmats)
   let textureID = fst $ matMap Data.Map.! "pm0263_00_Body1.png"
-
-
-  let initializeZig = do
-        let obj = smdToObj zigzagoon
-        let verts = objVerts obj
-        let indices = objIndices obj
-        let normals = flatten (smdNormals zigzagoon)
-        let uvs = flatten (smdUVs zigzagoon)
-        let objBufferSize obj = bufferSize verts + bufferSize indices + bufferSize normals + bufferSize uvs
-        let vertsOffset = 0
-        let indicesOffset = bufferSize verts
-        let normalsOffset = indicesOffset + bufferSize indices
-        let uvsOffset = normalsOffset + bufferSize normals
-        bufferID <- Foreign.alloca $ \bufferIDPtr -> do
-            GL.glGenBuffers 1 bufferIDPtr
-            Foreign.peek bufferIDPtr
-        GL.glBindBuffer GL.GL_ARRAY_BUFFER bufferID
-        GL.glBufferData GL.GL_ARRAY_BUFFER (objBufferSize obj) Foreign.nullPtr GL.GL_STATIC_DRAW
-        Foreign.withArray verts   (GL.glBufferSubData GL.GL_ARRAY_BUFFER vertsOffset   (bufferSize verts))
-        Foreign.withArray indices (GL.glBufferSubData GL.GL_ARRAY_BUFFER indicesOffset (bufferSize indices))
-        Foreign.withArray normals (GL.glBufferSubData GL.GL_ARRAY_BUFFER normalsOffset (bufferSize normals))
-        Foreign.withArray uvs     (GL.glBufferSubData GL.GL_ARRAY_BUFFER uvsOffset     (bufferSize uvs))
-        vertexArrayObjectID <- Foreign.alloca $ \idPtr -> do
-            GL.glGenVertexArrays 1 idPtr
-            Foreign.peek idPtr
-        GL.glBindVertexArray vertexArrayObjectID
-        GL.glEnableVertexAttribArray 0
-        GL.glEnableVertexAttribArray 1
-        GL.glEnableVertexAttribArray 2
-        GL.glEnableVertexAttribArray 3
-        GL.glBindBuffer GL.GL_ARRAY_BUFFER bufferID
-        GL.glVertexAttribPointer 0 3 GL.GL_FLOAT GL.GL_FALSE (fromIntegral (size @GL.GLfloat) * 6) (Foreign.plusPtr Foreign.nullPtr (fromIntegral 0))
-        GL.glVertexAttribPointer 1 3 GL.GL_FLOAT GL.GL_FALSE (fromIntegral (size @GL.GLfloat) * 6) (Foreign.plusPtr Foreign.nullPtr (fromIntegral 0 + 3*size @GL.GLfloat))
-        GL.glVertexAttribPointer 2 3 GL.GL_FLOAT GL.GL_FALSE (fromIntegral (size @GL.GLfloat) * 3) (Foreign.plusPtr Foreign.nullPtr (fromIntegral normalsOffset))
-        GL.glVertexAttribPointer 3 2 GL.GL_FLOAT GL.GL_FALSE (fromIntegral (size @GL.GLfloat) * 2) (Foreign.plusPtr Foreign.nullPtr (fromIntegral uvsOffset))
-        GL.glBindBuffer GL.GL_ELEMENT_ARRAY_BUFFER bufferID
-        pure (ObjMetadata
-              { vertexArrayID = vertexArrayObjectID
-              , indexOffset = indicesOffset
-              , indexCount = fromIntegral (length (objIndices obj))
-              })
-  
-  zigMetadata <- initializeZig
-
-  -- to render a multimaterial thing, we need to split it up into material meshes
-  -- this is a texture-buffer vao pair. simplest way probably
-  --
-  -- easiest to do this from the base set. filter the triangle sets from the smd by material. yea this is it
-
-
-
 
 
   skellyShader <- initShader
@@ -947,30 +985,7 @@ main = do
 
   skelly <- do
         let pose = head (smdPoses zigzagoon)
-        let verts = flatten $ roseVerts pose
-        let indices = fmap fromIntegral (foldr (\(a,b) -> ([a,b]++)) [] (roseEdges pose)) :: [GL.GLushort]
-        let vertsOffset = 0
-        let indicesOffset = bufferSize verts
-        bufferID <- Foreign.alloca $ \bufferIDPtr -> do
-            GL.glGenBuffers 1 bufferIDPtr
-            Foreign.peek bufferIDPtr
-        GL.glBindBuffer GL.GL_ARRAY_BUFFER bufferID
-        GL.glBufferData GL.GL_ARRAY_BUFFER (bufferSize verts + bufferSize indices) Foreign.nullPtr GL.GL_STATIC_DRAW
-        Foreign.withArray verts         (GL.glBufferSubData GL.GL_ARRAY_BUFFER vertsOffset   (bufferSize verts))
-        Foreign.withArray indices       (GL.glBufferSubData GL.GL_ARRAY_BUFFER indicesOffset (bufferSize indices))
-        vertexArrayObjectID <- Foreign.alloca $ \idPtr -> do
-            GL.glGenVertexArrays 1 idPtr
-            Foreign.peek idPtr
-        GL.glBindVertexArray vertexArrayObjectID
-        GL.glEnableVertexAttribArray 0
-        GL.glBindBuffer GL.GL_ARRAY_BUFFER bufferID
-        GL.glVertexAttribPointer 0 4 GL.GL_FLOAT GL.GL_FALSE (fromIntegral (size @GL.GLfloat) * 4) (Foreign.plusPtr Foreign.nullPtr (fromIntegral 0))
-        GL.glBindBuffer GL.GL_ELEMENT_ARRAY_BUFFER bufferID
-        pure (ObjMetadata
-              { vertexArrayID = vertexArrayObjectID
-              , indexOffset = indicesOffset
-              , indexCount = fromIntegral (length indices)
-              })
+        genLineBuffer (roseEdges pose) (roseVerts pose)
 
 
   --- MAIN LOOP ----------------------------------------------------------------
