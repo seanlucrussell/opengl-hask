@@ -283,42 +283,6 @@ smdPoseTransforms smd = do
 --   save in node
 --   pass transformation to children
 
-zigscale = 0.03
-
-smdVertices :: SMD -> [OBJ_Vertex]
-smdVertices smd = do
-  (va,vb,vc) <- verts <$> triangles smd
-  [  OBJ_Vertex (vPos va) (v3 1 1 1)
-   , OBJ_Vertex (vPos vb) (v3 1 1 1)
-   , OBJ_Vertex (vPos vc) (v3 1 1 1)
-   ]
-
-smdFaces :: SMD -> [Face]
-smdFaces smd = do
-  n <- [0..length (triangles smd)-1]
-  pure (3*n,3*n+1,3*n+2)
-
-smdToObj :: SMD -> Obj
-smdToObj smd = Obj (smdVertices smd) (smdFaces smd)
-
-smdNormals :: SMD -> [Vec 3]
-smdNormals smd = do
-  (va,vb,vc) <- verts <$> triangles smd
-  [  vNormal va
-   , vNormal vb
-   , vNormal vc
-   ]
-
-smdUVs :: SMD -> [Vec 2]
-smdUVs smd = do
-  (va,vb,vc) <- verts <$> triangles smd
-  [  vUV va
-   , vUV vb
-   , vUV vc
-   ]
-
-smdMats :: SMD -> Data.Set.Set String
-smdMats = Data.Set.fromList . fmap material . triangles
 
 --- OBJ PARSER -----------------------------------------------------------------
 
@@ -346,9 +310,6 @@ pObj =
     line :: Parser (Obj -> Obj) = MP.try vertexLine <|> MP.try faceLine <|> skipLine
   in fmap (foldr ($) (Obj [] [])) (MP.many (line <* optional C.eol) <* MP.eof)
 
-objVerts :: Obj -> [GL.GLfloat] = flatten . vertices
-objIndices :: Obj -> [GL.GLushort] = fmap fromIntegral . foldr (\(a,b,c) -> ([a,b,c]++)) [] . faces
-
 normals :: Obj -> [Vec 3]
 normals obj =
   let verts = position <$> vertices obj
@@ -370,18 +331,6 @@ normalModel obj = do
   [ OBJ_Vertex { position = position vert, color = v3 1 1 1 }
     , OBJ_Vertex { position = position vert + 0.3 * normal, color = v3 1 1 1 }
     ]
-
-objBufferSize obj = bufferSize (objVerts obj) + bufferSize (objIndices obj)
-
-cubeVerts :: [GL.GLfloat]
-cubeVerts = objVerts cubeObj
-cubeIndices :: [GL.GLushort]
-cubeIndices = objIndices cubeObj
-
-pyramidVerts :: [GL.GLfloat]
-pyramidVerts = objVerts pyramidObj
-pyramidIndices :: [GL.GLushort]
-pyramidIndices = objIndices pyramidObj
 
 cubeObj = Obj
   { vertices =
@@ -450,29 +399,15 @@ pyramidObj = Obj
     ]
   }
 
-pyramidNormalIndices :: [GL.GLushort]
-pyramidNormalIndices = [0..fromIntegral (length pyramidNormalVerts')-1]
-pyramidNormalVerts :: [GL.GLfloat]
-pyramidNormalVerts = flatten pyramidNormalVerts'  
-pyramidNormalVerts' :: [OBJ_Vertex]
-pyramidNormalVerts' = normalModel pyramidObj  
 
-squareIndices tl tr bl br = [(tl,bl,tr),(br,tr,bl)]
-
-planeHeight=20
-planeWidth=20
-
-seed = 10
-
-planeVerts :: [GL.GLfloat]
-planeVerts = objVerts planeObj
-
-planeIndices :: [GL.GLushort]
-planeIndices = objIndices planeObj
-
-planeObj = Obj
+planeObj =
+  let planeHeight=20
+      planeWidth=20
+      squareIndices tl tr bl br = [(tl,bl,tr),(br,tr,bl)]
+  in Obj
   { vertices = do
     i <- [0..planeHeight*planeHeight-1]
+    let seed = 10
     let x = fromIntegral (i `mod` planeWidth)
     let y = fromIntegral (i `div` planeHeight)
     let intPairInject y = let t n = if n<0 then -2*n-1 else 2*n; a=t i; b=t (seed+y) in (a+b)*(a+b+1)`div`2+b
@@ -487,12 +422,129 @@ planeObj = Obj
       squareIndices (i*planeWidth+j) (i*planeWidth+j+1) ((i+1)*planeWidth+j) ((i+1)*planeWidth+j+1)
   }
 
-planeNormalIndices :: [GL.GLushort]
-planeNormalIndices = [0..fromIntegral (length planeNormalVerts')-1]
-planeNormalVerts :: [GL.GLfloat]
-planeNormalVerts = flatten planeNormalVerts'  
-planeNormalVerts' :: [OBJ_Vertex]
-planeNormalVerts' = normalModel planeObj  
+
+
+--- GL UTILS -------------------------------------------------------------------
+
+data ObjMetadata = ObjMetadata { vertexArrayID :: GL.GLuint, indexCount :: GL.GLsizei } deriving Show
+
+class SetUniform u where setUniform :: GL.GLint -> u -> IO ()
+instance SetUniform (Vec 2) where setUniform loc v = Foreign.withArray (flatten v) (GL.glUniform2fv loc 1)
+instance SetUniform (Vec 3) where setUniform loc v = Foreign.withArray (flatten v) (GL.glUniform3fv loc 1)
+instance SetUniform (Vec 4) where setUniform loc v = Foreign.withArray (flatten v) (GL.glUniform4fv loc 1)
+instance SetUniform (Mat 4 4) where setUniform loc m = Foreign.withArray (flatten m) (GL.glUniformMatrix4fv loc 1 0)
+instance SetUniform (Vec 4 -> Vec 4) where setUniform loc m = Foreign.withArray (flatten (transformToMat m)) (GL.glUniformMatrix4fv loc 1 0)
+
+data a :& b = a :& b deriving Show
+
+instance (Flatten a, Flatten b) => Flatten (a :& b) where flatten (a :& b) = flatten a ++ flatten b
+instance (Vertex a, Vertex b) => Vertex (a :& b) where layout = layout @a ++ layout @b
+
+instance KnownNat n => Vertex (Vec n) where layout = [fromIntegral (maxBound :: Finite n)+1]
+
+class Flatten v => Vertex v where layout :: [Int]
+
+vertexSize :: forall v i.(Vertex v,Integral i) => i
+vertexSize = fromIntegral (size @GL.GLfloat * sum (layout @v))
+
+instance Flatten SMD_Vertex where flatten v = flatten (vPos v) ++ flatten (vNormal v) ++ flatten (vUV v)
+instance Vertex SMD_Vertex where layout = [3,3,2]
+
+class Flatten a where flatten :: a -> [GL.GLfloat]
+instance KnownNat n => Flatten (Vec n) where flatten v = v <$> finites
+instance (KnownNat m, KnownNat n) => Flatten (Mat m n) where flatten m = flip m <$> finites <*> finites
+instance Flatten a => Flatten [a] where flatten = concatMap flatten
+
+instance Flatten OBJ_Vertex where flatten vertex = flatten (position vertex) ++ flatten (color vertex)
+instance Vertex OBJ_Vertex where layout = [3,3]
+
+genTriBuffer :: forall v i.(Vertex v, Integral i) => [(i,i,i)] -> [v] -> IO ObjMetadata
+genTriBuffer indices verts = do
+
+  vertexArrayObjectID <- Foreign.alloca $ \idPtr -> do
+      GL.glGenVertexArrays 1 idPtr
+      Foreign.peek idPtr
+  GL.glBindVertexArray vertexArrayObjectID
+
+  Foreign.alloca $ \indexBufferIDPtr -> do
+      GL.glGenBuffers 1 indexBufferIDPtr
+      indexBufferID <- Foreign.peek indexBufferIDPtr
+      GL.glBindBuffer GL.GL_ELEMENT_ARRAY_BUFFER indexBufferID
+      let indexBufferContent :: [GL.GLushort] = concatMap (\(a,b,c) -> fromIntegral <$> [a,b,c]) indices
+      let indexBufferSize = fromIntegral (size @GL.GLushort * length indexBufferContent)
+      Foreign.withArray indexBufferContent (flip (GL.glBufferData GL.GL_ELEMENT_ARRAY_BUFFER indexBufferSize) GL.GL_STATIC_DRAW)
+
+  Foreign.alloca $ \vertexBufferIDPtr -> do
+      GL.glGenBuffers 1 vertexBufferIDPtr
+      vertexBufferID <- Foreign.peek vertexBufferIDPtr
+      GL.glBindBuffer GL.GL_ARRAY_BUFFER vertexBufferID
+      let vertexBufferContent = flatten verts
+      let vertexBufferSize = fromIntegral (size @GL.GLfloat * length vertexBufferContent)
+      Foreign.withArray vertexBufferContent (flip (GL.glBufferData GL.GL_ARRAY_BUFFER vertexBufferSize) GL.GL_STATIC_DRAW)
+
+  
+  let bufferData l = zip [0..] (zip (scanl (+) 0 l) l)
+  let attribs = bufferData (layout @v)
+  mapM (\(index,(bufferOffset,attributeSize)) -> do
+      GL.glEnableVertexAttribArray index
+      GL.glVertexAttribPointer
+         index
+         (fromIntegral attributeSize)
+         GL.GL_FLOAT
+         GL.GL_FALSE
+         (vertexSize @v)
+         (Foreign.plusPtr Foreign.nullPtr (bufferOffset * size @GL.GLfloat))
+    ) attribs
+
+  pure (ObjMetadata
+        { vertexArrayID = vertexArrayObjectID
+        , indexCount = fromIntegral (3 * length indices)
+        })
+
+
+genLineBuffer :: forall v i.(Vertex v, Integral i) => [(i,i)] -> [v] -> IO ObjMetadata
+genLineBuffer indices verts = do
+
+  vertexArrayObjectID <- Foreign.alloca $ \idPtr -> do
+      GL.glGenVertexArrays 1 idPtr
+      Foreign.peek idPtr
+  GL.glBindVertexArray vertexArrayObjectID
+
+  Foreign.alloca $ \indexBufferIDPtr -> do
+      GL.glGenBuffers 1 indexBufferIDPtr
+      indexBufferID <- Foreign.peek indexBufferIDPtr
+      GL.glBindBuffer GL.GL_ELEMENT_ARRAY_BUFFER indexBufferID
+      let indexBufferContent :: [GL.GLushort] = concatMap (\(a,b) -> fromIntegral <$> [a,b]) indices
+      let indexBufferSize = fromIntegral (size @GL.GLuint * length indexBufferContent)
+      Foreign.withArray indexBufferContent (flip (GL.glBufferData GL.GL_ELEMENT_ARRAY_BUFFER indexBufferSize) GL.GL_STATIC_DRAW)
+
+  Foreign.alloca $ \vertexBufferIDPtr -> do
+      GL.glGenBuffers 1 vertexBufferIDPtr
+      vertexBufferID <- Foreign.peek vertexBufferIDPtr
+      GL.glBindBuffer GL.GL_ARRAY_BUFFER vertexBufferID
+      let vertexBufferContent = flatten verts
+      let vertexBufferSize = fromIntegral (size @GL.GLfloat * length vertexBufferContent)
+      Foreign.withArray vertexBufferContent (flip (GL.glBufferData GL.GL_ARRAY_BUFFER vertexBufferSize) GL.GL_STATIC_DRAW)
+
+  
+  let bufferData l = zip [0..] (zip (scanl (+) 0 l) l)
+  let attribs = bufferData (layout @v)
+  mapM (\(index,(bufferOffset,attributeSize)) -> do
+      GL.glEnableVertexAttribArray index
+      GL.glVertexAttribPointer
+         index
+         (fromIntegral attributeSize)
+         GL.GL_FLOAT
+         GL.GL_FALSE
+         (vertexSize @v)
+         (Foreign.plusPtr Foreign.nullPtr (bufferOffset * size @GL.GLfloat))
+    ) attribs
+
+  pure (ObjMetadata
+        { vertexArrayID = vertexArrayObjectID
+        , indexCount = fromIntegral (2 * length indices)
+        })
+
 
 
 --- MAIN GRAPHICS PROGRAM ------------------------------------------------------
@@ -573,124 +625,6 @@ moveUp =
    moveCamera (v4 0 1 0 1) -- alt for vector literals: ijkl -> v4 0 1 0 1 = j + l
 moveDown =
    moveCamera (v4 0 (-1) 0 1) -- or v4 0 (-1) 0 1 = l - j
-
-data ObjMetadata = ObjMetadata { vertexArrayID :: GL.GLuint, indexCount :: GL.GLsizei, indexOffset :: GL.GLintptr } deriving Show
-
-
-
-
-data a :& b = a :& b deriving Show
-
-instance (Flatten a, Flatten b) => Flatten (a :& b) where flatten (a :& b) = flatten a ++ flatten b
-instance (Vertex a, Vertex b) => Vertex (a :& b) where layout = layout @a ++ layout @b
-
-instance KnownNat n => Vertex (Vec n) where layout = [fromIntegral (maxBound :: Finite n)+1]
-
-class Flatten v => Vertex v where layout :: [Int]
-
-vertexSize :: forall v i.(Vertex v,Integral i) => i
-vertexSize = fromIntegral (size @GL.GLfloat * sum (layout @v))
-
-instance Flatten SMD_Vertex where flatten v = flatten (vPos v) ++ flatten (vNormal v) ++ flatten (vUV v)
-instance Vertex SMD_Vertex where layout = [3,3,2]
-
-class Flatten a where flatten :: a -> [GL.GLfloat]
-instance KnownNat n => Flatten (Vec n) where flatten v = v <$> finites
-instance (KnownNat m, KnownNat n) => Flatten (Mat m n) where flatten m = flip m <$> finites <*> finites
-instance Flatten a => Flatten [a] where flatten = concatMap flatten
-
-instance Flatten OBJ_Vertex where flatten vertex = flatten (position vertex) ++ flatten (color vertex)
-instance Vertex OBJ_Vertex where layout = [3,3]
-
-genTriBuffer :: forall v i.(Vertex v, Integral i) => [(i,i,i)] -> [v] -> IO ObjMetadata
-genTriBuffer indices verts = do
-
-  vertexArrayObjectID <- Foreign.alloca $ \idPtr -> do
-      GL.glGenVertexArrays 1 idPtr
-      Foreign.peek idPtr
-  GL.glBindVertexArray vertexArrayObjectID
-
-  Foreign.alloca $ \indexBufferIDPtr -> do
-      GL.glGenBuffers 1 indexBufferIDPtr
-      indexBufferID <- Foreign.peek indexBufferIDPtr
-      GL.glBindBuffer GL.GL_ELEMENT_ARRAY_BUFFER indexBufferID
-      let indexBufferContent :: [GL.GLushort] = concatMap (\(a,b,c) -> fromIntegral <$> [a,b,c]) indices
-      let indexBufferSize = fromIntegral (size @GL.GLushort * length indexBufferContent)
-      Foreign.withArray indexBufferContent (flip (GL.glBufferData GL.GL_ELEMENT_ARRAY_BUFFER indexBufferSize) GL.GL_STATIC_DRAW)
-
-  Foreign.alloca $ \vertexBufferIDPtr -> do
-      GL.glGenBuffers 1 vertexBufferIDPtr
-      vertexBufferID <- Foreign.peek vertexBufferIDPtr
-      GL.glBindBuffer GL.GL_ARRAY_BUFFER vertexBufferID
-      let vertexBufferContent = flatten verts
-      let vertexBufferSize = fromIntegral (size @GL.GLfloat * length vertexBufferContent)
-      Foreign.withArray vertexBufferContent (flip (GL.glBufferData GL.GL_ARRAY_BUFFER vertexBufferSize) GL.GL_STATIC_DRAW)
-
-  
-  let bufferData l = zip [0..] (zip (scanl (+) 0 l) l)
-  let attribs = bufferData (layout @v)
-  mapM (\(index,(bufferOffset,attributeSize)) -> do
-      GL.glEnableVertexAttribArray index
-      GL.glVertexAttribPointer
-         index
-         (fromIntegral attributeSize)
-         GL.GL_FLOAT
-         GL.GL_FALSE
-         (vertexSize @v)
-         (Foreign.plusPtr Foreign.nullPtr (bufferOffset * size @GL.GLfloat))
-    ) attribs
-
-  pure (ObjMetadata
-        { vertexArrayID = vertexArrayObjectID
-        , indexOffset = 0
-        , indexCount = fromIntegral (3 * length indices)
-        })
-
-
-genLineBuffer :: forall v i.(Vertex v, Integral i) => [(i,i)] -> [v] -> IO ObjMetadata
-genLineBuffer indices verts = do
-
-  vertexArrayObjectID <- Foreign.alloca $ \idPtr -> do
-      GL.glGenVertexArrays 1 idPtr
-      Foreign.peek idPtr
-  GL.glBindVertexArray vertexArrayObjectID
-
-  Foreign.alloca $ \indexBufferIDPtr -> do
-      GL.glGenBuffers 1 indexBufferIDPtr
-      indexBufferID <- Foreign.peek indexBufferIDPtr
-      GL.glBindBuffer GL.GL_ELEMENT_ARRAY_BUFFER indexBufferID
-      let indexBufferContent :: [GL.GLushort] = concatMap (\(a,b) -> fromIntegral <$> [a,b]) indices
-      let indexBufferSize = fromIntegral (size @GL.GLuint * length indexBufferContent)
-      Foreign.withArray indexBufferContent (flip (GL.glBufferData GL.GL_ELEMENT_ARRAY_BUFFER indexBufferSize) GL.GL_STATIC_DRAW)
-
-  Foreign.alloca $ \vertexBufferIDPtr -> do
-      GL.glGenBuffers 1 vertexBufferIDPtr
-      vertexBufferID <- Foreign.peek vertexBufferIDPtr
-      GL.glBindBuffer GL.GL_ARRAY_BUFFER vertexBufferID
-      let vertexBufferContent = flatten verts
-      let vertexBufferSize = fromIntegral (size @GL.GLfloat * length vertexBufferContent)
-      Foreign.withArray vertexBufferContent (flip (GL.glBufferData GL.GL_ARRAY_BUFFER vertexBufferSize) GL.GL_STATIC_DRAW)
-
-  
-  let bufferData l = zip [0..] (zip (scanl (+) 0 l) l)
-  let attribs = bufferData (layout @v)
-  mapM (\(index,(bufferOffset,attributeSize)) -> do
-      GL.glEnableVertexAttribArray index
-      GL.glVertexAttribPointer
-         index
-         (fromIntegral attributeSize)
-         GL.GL_FLOAT
-         GL.GL_FALSE
-         (vertexSize @v)
-         (Foreign.plusPtr Foreign.nullPtr (bufferOffset * size @GL.GLfloat))
-    ) attribs
-
-  pure (ObjMetadata
-        { vertexArrayID = vertexArrayObjectID
-        , indexOffset = 0
-        , indexCount = fromIntegral (2 * length indices)
-        })
-
 
 
 main :: IO ()
@@ -907,13 +841,9 @@ main = do
       Left err -> print err >> System.Exit.exitFailure
       Right model -> pure model
 
-  let zigzagoon = smdscale zigscale (zigzagoon' {skeleton = ziganim})
+  let zigzagoon = smdscale 0.03 (zigzagoon' {skeleton = ziganim})
 
   -- we should figure out how to deform the skeleton first! then apply the basic principles from that simple situation to the model itself
-
-  print ziganim
-
-  let zigmats = smdMats zigzagoon
 
   let readTex matName = do
           print matName
@@ -937,8 +867,8 @@ main = do
                     GL.GL_TEXTURE_2D
                     0
                     (fromIntegral GL.GL_SRGB8_ALPHA8)
-                    (fromIntegral $ Codec.Picture.imageWidth img)
-                    (fromIntegral $ Codec.Picture.imageHeight img)
+                    (fromIntegral (Codec.Picture.imageWidth img))
+                    (fromIntegral (Codec.Picture.imageHeight img))
                     0
                     GL.GL_RGBA
                     GL.GL_UNSIGNED_BYTE
@@ -960,9 +890,9 @@ main = do
               pure (textureID,md)
   
 
-  matMap <- sequenceA (Data.Map.Internal.fromSet readTex zigmats)
-  let textureID = fst $ matMap Data.Map.! "pm0263_00_Body1.png"
+  let zigmats = Data.Set.fromList (material <$> triangles zigzagoon)
 
+  matMap <- sequenceA (Data.Map.Internal.fromSet readTex zigmats)
 
   skellyShader <- initShader
         """#version 430\r\n
@@ -983,9 +913,7 @@ main = do
   skelly_modelToProjectionMatrixUniform <-
      Foreign.C.String.withCString "modelToProjectionMatrix" (GL.glGetUniformLocation skellyShader)
 
-  skelly <- do
-        let pose = head (smdPoses zigzagoon)
-        genLineBuffer (roseEdges pose) (roseVerts pose)
+  skelly <- let pose = head (smdPoses zigzagoon) in genLineBuffer (roseEdges pose) (roseVerts pose)
 
 
   --- MAIN LOOP ----------------------------------------------------------------
@@ -1016,32 +944,21 @@ main = do
         GL.glClear GL.GL_COLOR_BUFFER_BIT
         GL.glClear GL.GL_DEPTH_BUFFER_BIT
 
-        GL.glUseProgram basicShader
-
-        let lightPosition = v3 3 0 2
-
-        Foreign.withArray (flatten (v4 0.3 0.3 0.3 1)) (GL.glUniform4fv ambientLightUniform 1)
-        Foreign.withArray (flatten lightPosition) (GL.glUniform3fv lightPositionUniform 1)
-        Foreign.withArray (flatten (cameraPosition appState . weaken)) (GL.glUniform3fv eyePositionUniform 1)
-
         let aspectRatio = fromIntegral (windowWidth appState) / fromIntegral (windowHeight appState)
         let worldToView = worldToViewMatrix (cameraPosition appState . weaken) (viewDirection appState . weaken)
         let projectionMatrix = projection 60 aspectRatio 0.1 50
-        let toScreenspace t = (flatten @(Mat 4 4)) (transformToMat (projectionMatrix . worldToView . t))
+        let toScreenspace t = projectionMatrix . worldToView . t
         let drawTriangulation obj transform = do
-              Foreign.withArray
-                (flatten (transformToMat transform))
-                (GL.glUniformMatrix4fv modelToWorldTransformMatrixUniform 1 0)
               GL.glBindVertexArray (vertexArrayID obj)
-              Foreign.withArray
-                (toScreenspace transform)
-                (GL.glUniformMatrix4fv modelToProjectionMatrixUniform 1 0)
-              GL.glDrawElements
-                GL.GL_TRIANGLES
-                (indexCount obj)
-                GL.GL_UNSIGNED_SHORT
-                (Foreign.plusPtr Foreign.nullPtr (fromIntegral (indexOffset obj)))
+              setUniform modelToWorldTransformMatrixUniform transform
+              setUniform modelToProjectionMatrixUniform (toScreenspace transform)
+              GL.glDrawElements GL.GL_TRIANGLES (indexCount obj) GL.GL_UNSIGNED_SHORT Foreign.nullPtr
+        let lightPosition = v3 3 0 2
 
+        GL.glUseProgram basicShader
+        setUniform ambientLightUniform (v4 0.3 0.3 0.3 1)
+        setUniform lightPositionUniform lightPosition
+        setUniform eyePositionUniform (cameraPosition appState . weaken)
 
         drawTriangulation cubeMetadata (translate (v3 1 0 (-4)) . rotation 45 (v3 1 1 0))
         drawTriangulation cubeMetadata (translate (v3 (-1) 0 (-4)) . rotation 45 (v3 1 1 1))
@@ -1049,28 +966,25 @@ main = do
         drawTriangulation planeMetadata (translate (v3 0 (-2) (-4)))
         drawTriangulation teapotMetadata (translate (v3 (3) 1 (-8)))
 
+        let zigTransform = (translate (v3 (-2) (-1) (-1)) . rotation 45 (v3 0 1 0) . rotation 90 (v3 (-1) 0 0))        
+
         GL.glUseProgram textureShader
-        Foreign.withArray (flatten (v4 0.3 0.3 0.3 1)) (GL.glUniform4fv texture_ambientLightUniform 1)
-        Foreign.withArray (flatten lightPosition) (GL.glUniform3fv texture_lightPositionUniform 1)
-        Foreign.withArray (flatten (cameraPosition appState . weaken)) (GL.glUniform3fv texture_eyePositionUniform 1)
-        sequenceA (fmap (\(textureID,zigMetadata) -> do
-            GL.glActiveTexture GL.GL_TEXTURE0
-            GL.glBindTexture GL.GL_TEXTURE_2D textureID
-            GL.glUniform1i texture_textureUniform 0
-            drawTriangulation zigMetadata (translate (v3 (-2) (-1) (-1)) . rotation 45 (v3 0 1 0) . rotation 90 (v3 (-1) 0 0))
-            ) matMap)
+        setUniform ambientLightUniform (v4 0.3 0.3 0.3 1)
+        setUniform lightPositionUniform lightPosition
+        setUniform eyePositionUniform (cameraPosition appState . weaken)
+        mapM
+           (\(textureID,zigMetadata) -> do
+                GL.glActiveTexture GL.GL_TEXTURE0
+                GL.glBindTexture GL.GL_TEXTURE_2D textureID
+                GL.glUniform1i texture_textureUniform 0
+                drawTriangulation zigMetadata zigTransform)
+           matMap
 
         GL.glClear GL.GL_DEPTH_BUFFER_BIT
         GL.glUseProgram skellyShader
         GL.glBindVertexArray (vertexArrayID skelly)
-        Foreign.withArray
-          (toScreenspace (translate (v3 (-2) (-1) (-1)) . rotation 45 (v3 0 1 0) . rotation 90 (v3 (-1) 0 0)))
-          (GL.glUniformMatrix4fv skelly_modelToProjectionMatrixUniform 1 0)
-        GL.glDrawElements
-          GL.GL_LINES
-          (indexCount skelly)
-          GL.GL_UNSIGNED_SHORT
-          (Foreign.plusPtr Foreign.nullPtr (fromIntegral (indexOffset skelly)))
+        setUniform skelly_modelToProjectionMatrixUniform (toScreenspace zigTransform)
+        GL.glDrawElements GL.GL_LINES (indexCount skelly) GL.GL_UNSIGNED_SHORT Foreign.nullPtr
         
 
         unless (timeToQuit appState) (loop appState)
@@ -1083,3 +997,4 @@ main = do
   GL.glUseProgram 0
   GL.glDeleteProgram basicShader
   SDL.destroyWindow window
+
