@@ -38,7 +38,8 @@ import qualified Data.Map.Internal
 
 --- LINEAR ALGEBRA LIBRARY -----------------------------------------------------
 
-type Vec n = Finite n -> Float
+type Array n s = Finite n -> s
+type Vec n = Array n Float
 type Mat m n = Finite m -> Finite n -> Float
 
 x :: (KnownNat n, 1 <= n) => Finite n; x = 0
@@ -391,30 +392,21 @@ enumSize GL.GL_FLOAT = fromIntegral $ size @GL.GLfloat
 enumSize GL.GL_INT = fromIntegral $ size @GL.GLint
 
 data ObjMetadata = ObjMetadata { vertexArrayID :: GL.GLuint, indexCount :: GL.GLsizei } deriving Show
-data a :& b = a :& b deriving Show
 
 class SetUniform u where setUniform :: GL.GLint -> u -> IO ()
-instance SetUniform (Vec 2) where
-  setUniform loc v = Foreign.withArray (v <$> finites) (GL.glUniform2fv loc 1)
-instance SetUniform (Vec 3) where
-  setUniform loc v = Foreign.withArray (v <$> finites) (GL.glUniform3fv loc 1)
-instance SetUniform (Vec 4) where
-  setUniform loc v = Foreign.withArray (v <$> finites) (GL.glUniform4fv loc 1)
-instance SetUniform (Mat 4 4) where
-  setUniform loc m = Foreign.withArray (flip m <$> finites <*> finites) (GL.glUniformMatrix4fv loc 1 0)
-instance SetUniform (Vec 4 -> Vec 4) where
-  setUniform loc = setUniform loc . transformToMat
+instance SetUniform (Vec 2) where setUniform loc v = Foreign.with v (GL.glUniform2fv loc 1 . Foreign.castPtr)
+instance SetUniform (Vec 3) where setUniform loc v = Foreign.with v (GL.glUniform3fv loc 1 . Foreign.castPtr)
+instance SetUniform (Vec 4) where setUniform loc v = Foreign.with v (GL.glUniform4fv loc 1 . Foreign.castPtr)
+instance SetUniform (Mat 4 4) where setUniform loc m = Foreign.with m (GL.glUniformMatrix4fv loc 1 1 . Foreign.castPtr)
+instance SetUniform (Vec 4 -> Vec 4) where setUniform loc = setUniform loc . transformToMat
 
 class Vertex v where layout :: [Attribute]
-instance (Vertex a, Vertex b) => Vertex (a :& b) where layout = layout @a ++ layout @b
 instance KnownNat n => Vertex (Vec n) where layout = [(fromIntegral (maxBound :: Finite n)+1,GL.GL_FLOAT)]
-instance Vertex SMD_Vertex where layout = [(3,GL.GL_FLOAT),(3,GL.GL_FLOAT),(2,GL.GL_FLOAT)]
-instance Vertex OBJ_Vertex where layout = [(3,GL.GL_FLOAT),(3,GL.GL_FLOAT)]
 
 
-instance KnownNat n => Data.Vector.Storable.Storable (Vec n) where
-  sizeOf _ = (1+fromIntegral (maxBound :: Finite n)) * size @Float
-  alignment _ = alignment @Float
+instance (Data.Vector.Storable.Storable s, KnownNat n) => Data.Vector.Storable.Storable (Array n s) where
+  sizeOf _ = (1+fromIntegral (maxBound :: Finite n)) * size @s
+  alignment _ = alignment @s
   peek p = do
     let n = fromIntegral (maxBound :: Finite n)
     xs <- Foreign.peekArray n (Foreign.castPtr p)
@@ -424,32 +416,23 @@ instance KnownNat n => Data.Vector.Storable.Storable (Vec n) where
 roundUp :: Int -> Int -> Int
 roundUp val base = (val + base - 1) `div` base * base
 
-instance (Data.Vector.Storable.Storable a, Data.Vector.Storable.Storable b) => Data.Vector.Storable.Storable (a :& b) where
-  sizeOf _ = roundUp (roundUp (size @a) (alignment @b) + (size @b)) (max (alignment @a) (alignment @b))
-  alignment _ = max (alignment @a) (alignment @b)
-  peek p = do
-      a <- Foreign.peek (Foreign.castPtr p)
-      b <- Foreign.peekByteOff p (roundUp (size @a) (alignment @b))
-      pure (a :& b)
-  poke p (a :& b) = do
-      Foreign.poke (Foreign.castPtr p) a
-      Foreign.pokeByteOff p (roundUp (size @a) (alignment @b)) b
 
-
-data TexturedSkeletonVertex = TexturedSkeletonVertex (Vec 3) (Vec 3) (Vec 2) deriving (Show)
-instance Vertex TexturedSkeletonVertex where layout = [(3,GL.GL_FLOAT),(3,GL.GL_FLOAT),(2,GL.GL_FLOAT)]
+data TexturedSkeletonVertex = TexturedSkeletonVertex (Vec 3) (Vec 3) (Vec 2) Int deriving (Show)
+instance Vertex TexturedSkeletonVertex where layout = [(3,GL.GL_FLOAT),(3,GL.GL_FLOAT),(2,GL.GL_FLOAT),(1,GL.GL_INT)]
 instance Data.Vector.Storable.Storable TexturedSkeletonVertex where
-  sizeOf _ = roundUp (sum [size @(Vec 3), size @(Vec 3), size @(Vec 2)]) (alignment @TexturedSkeletonVertex)
-  alignment _ = maximum [alignment @(Vec 3), alignment @(Vec 3), alignment @(Vec 2)]
+  sizeOf _ = roundUp (sum [size @(Vec 3), size @(Vec 3), size @(Vec 2), size @Int]) (alignment @TexturedSkeletonVertex)
+  alignment _ = maximum [alignment @(Vec 3), alignment @(Vec 3), alignment @(Vec 2), alignment @Int]
   peek p =
     TexturedSkeletonVertex
        <$> Foreign.peekByteOff p (0 * size @GL.GLfloat)
        <*> Foreign.peekByteOff p (3 * size @GL.GLfloat)
        <*> Foreign.peekByteOff p (6 * size @GL.GLfloat)
-  poke p (TexturedSkeletonVertex a b c) = do
+       <*> Foreign.peekByteOff p (8 * size @GL.GLfloat)
+  poke p (TexturedSkeletonVertex a b c d) = do
       Foreign.pokeByteOff p (0 * size @GL.GLfloat) a
       Foreign.pokeByteOff p (3 * size @GL.GLfloat) b
       Foreign.pokeByteOff p (6 * size @GL.GLfloat) c
+      Foreign.pokeByteOff p (8 * size @GL.GLfloat) d
 
 
 data ColoredNormalVertex = ColoredNormalVertex (Vec 3) (Vec 3) (Vec 3) deriving (Show)
@@ -508,9 +491,9 @@ setShaderUniform programID uniformName value = do
   uniformLoc <- Foreign.C.String.withCString uniformName (GL.glGetUniformLocation programID)
   setUniform uniformLoc value
 
-bufferData :: [Attribute] -> IO ()
-bufferData attributes =
-  let stride = fromIntegral (sum ((\(s,e) -> s * enumSize e) <$> attributes))
+bufferData :: forall v.(Data.Vector.Storable.Storable v, Vertex v) => IO ()
+bufferData =
+  let stride = fromIntegral (size @v)
       go index offset [] = pure ()
       go index offset ((attributeDimension,scalarType):xs) = do
         GL.glEnableVertexAttribArray index
@@ -530,7 +513,7 @@ bufferData attributes =
                  offset
             _ -> error "BUFFER ERROR: we don't support that type yet"
         go (index + 1) (Foreign.plusPtr offset (fromIntegral (enumSize scalarType * attributeDimension))) xs
-  in go 0 Foreign.nullPtr attributes
+  in go 0 Foreign.nullPtr (layout @v)
 
 genTriBuffer :: forall v i.(Data.Vector.Storable.Storable v, Vertex v, Integral i) => [(i,i,i)] -> [v] -> IO ObjMetadata
 genTriBuffer indices verts = do
@@ -551,7 +534,7 @@ genTriBuffer indices verts = do
       GL.glBindBuffer GL.GL_ARRAY_BUFFER vertexBufferID
       let vertexBufferSize = fromIntegral (size @v * length verts)
       Foreign.withArray verts (flip (GL.glBufferData GL.GL_ARRAY_BUFFER vertexBufferSize) GL.GL_STATIC_DRAW)
-  bufferData (layout @v)
+  bufferData @v
   pure (ObjMetadata { vertexArrayID = vertexArrayObjectID , indexCount = fromIntegral (3 * length indices) })
 
 
@@ -574,7 +557,7 @@ genLineBuffer indices verts = do
       GL.glBindBuffer GL.GL_ARRAY_BUFFER vertexBufferID
       let vertexBufferSize = fromIntegral (size @v * length verts)
       Foreign.withArray verts (flip (GL.glBufferData GL.GL_ARRAY_BUFFER vertexBufferSize) GL.GL_STATIC_DRAW)
-  bufferData (layout @v)
+  bufferData @v
   pure (ObjMetadata { vertexArrayID = vertexArrayObjectID , indexCount = fromIntegral (2 * length indices) })
 
 
@@ -885,7 +868,7 @@ main = do
               let smd = zigzagoon {triangles = filter (\v -> material v == matName) (triangles zigzagoon)}
               let smdTris = fmap (\n -> (3*n,3*n+1,3*n+2)) [0..length (triangles smd) - 1]
               let smdVerts = concatMap (\v -> let (a,b,c) = verts v in [a,b,c]) (triangles smd)
-              md <- genTriBuffer smdTris (fmap (\v -> TexturedSkeletonVertex (vPos v) (vNormal v) (vUV v)) smdVerts)
+              md <- genTriBuffer smdTris (fmap (\v -> TexturedSkeletonVertex (vPos v) (vNormal v) (vUV v) (vParent v)) smdVerts)
               pure (textureID,md)
 
   matMap <- sequenceA (Data.Map.Internal.fromSet readTex (Data.Set.fromList (material <$> triangles zigzagoon)))
