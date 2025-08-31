@@ -365,6 +365,9 @@ smdReferencePoseTransform smd frame =
        in Rose newTransform (subtree newTransform <$> maybe [] id (Data.Map.lookup n childMap))
   in subtree id 0
 
+-- honestly the simples way to do this is probably to track the vertex id and then pack things into an array after they are built.
+
+
 -- challenge: keeping indices synced. the vertex attributes have to reference the same pose transforms as the references. so maybe we really SHOULD do a map-based op
 --
 -- cuz we only need the tree for visualizing right? for linking and visualizing. we should preserve the other stuff
@@ -416,12 +419,14 @@ instance (Data.Vector.Storable.Storable s, KnownNat n) => Data.Vector.Storable.S
 roundUp :: Int -> Int -> Int
 roundUp val base = (val + base - 1) `div` base * base
 
+smdToTexturedSkeletonVertex :: SMD_Vertex -> TexturedSkeletonVertex
+smdToTexturedSkeletonVertex v = TexturedSkeletonVertex (vPos v) (vNormal v) (vUV v) (fromIntegral (fst (head (vWeights v))))
 
-data TexturedSkeletonVertex = TexturedSkeletonVertex (Vec 3) (Vec 3) (Vec 2) Int deriving (Show)
+data TexturedSkeletonVertex = TexturedSkeletonVertex (Vec 3) (Vec 3) (Vec 2) GL.GLint deriving (Show)
 instance Vertex TexturedSkeletonVertex where layout = [(3,GL.GL_FLOAT),(3,GL.GL_FLOAT),(2,GL.GL_FLOAT),(1,GL.GL_INT)]
 instance Data.Vector.Storable.Storable TexturedSkeletonVertex where
-  sizeOf _ = roundUp (sum [size @(Vec 3), size @(Vec 3), size @(Vec 2), size @Int]) (alignment @TexturedSkeletonVertex)
-  alignment _ = maximum [alignment @(Vec 3), alignment @(Vec 3), alignment @(Vec 2), alignment @Int]
+  sizeOf _ = roundUp (sum [size @(Vec 3), size @(Vec 3), size @(Vec 2), size @GL.GLint]) (alignment @TexturedSkeletonVertex)
+  alignment _ = maximum [alignment @(Vec 3), alignment @(Vec 3), alignment @(Vec 2), alignment @GL.GLint]
   peek p =
     TexturedSkeletonVertex
        <$> Foreign.peekByteOff p (0 * size @GL.GLfloat)
@@ -491,32 +496,34 @@ setShaderUniform programID uniformName value = do
   uniformLoc <- Foreign.C.String.withCString uniformName (GL.glGetUniformLocation programID)
   setUniform uniformLoc value
 
-bufferData :: forall v.(Data.Vector.Storable.Storable v, Vertex v) => IO ()
-bufferData =
+configureAttributes :: forall v.(Data.Vector.Storable.Storable v, Vertex v) => IO ()
+configureAttributes =
   let stride = fromIntegral (size @v)
       go index offset [] = pure ()
       go index offset ((attributeDimension,scalarType):xs) = do
         GL.glEnableVertexAttribArray index
         case scalarType of
-            GL.GL_FLOAT -> GL.glVertexAttribPointer
-                 index
-                 (fromIntegral attributeDimension)
-                 scalarType
-                 GL.GL_FALSE
-                 stride
-                 offset
-            GL.GL_INT -> GL.glVertexAttribIPointer
-                 index
-                 (fromIntegral attributeDimension)
-                 scalarType
-                 stride
-                 offset
+            GL.GL_FLOAT -> GL.glVertexAttribPointer index attributeDimension scalarType GL.GL_FALSE stride offset
+            GL.GL_INT -> GL.glVertexAttribIPointer index attributeDimension scalarType stride offset
             _ -> error "BUFFER ERROR: we don't support that type yet"
         go (index + 1) (Foreign.plusPtr offset (fromIntegral (enumSize scalarType * attributeDimension))) xs
   in go 0 Foreign.nullPtr (layout @v)
 
-genTriBuffer :: forall v i.(Data.Vector.Storable.Storable v, Vertex v, Integral i) => [(i,i,i)] -> [v] -> IO ObjMetadata
-genTriBuffer indices verts = do
+
+class Index i where
+  flatten :: i -> [GL.GLushort]
+  indexDim :: Int
+
+instance Integral i => Index (i,i,i) where
+  flatten (a,b,c) = fromIntegral <$> [a,b,c]
+  indexDim = 3
+
+instance Integral i => Index (i,i) where
+  flatten (a,b) = fromIntegral <$> [a,b]
+  indexDim = 2
+
+genBuffer :: forall v i.(Data.Vector.Storable.Storable v, Vertex v, Index i) => [i] -> [v] -> IO ObjMetadata
+genBuffer indices verts = do
   vertexArrayObjectID <- Foreign.alloca $ \idPtr -> do
       GL.glGenVertexArrays 1 idPtr
       Foreign.peek idPtr
@@ -525,7 +532,7 @@ genTriBuffer indices verts = do
       GL.glGenBuffers 1 indexBufferIDPtr
       indexBufferID <- Foreign.peek indexBufferIDPtr
       GL.glBindBuffer GL.GL_ELEMENT_ARRAY_BUFFER indexBufferID
-      let indexBufferContent :: [GL.GLushort] = concatMap (\(a,b,c) -> fromIntegral <$> [a,b,c]) indices
+      let indexBufferContent :: [GL.GLushort] = concatMap flatten indices
       let indexBufferSize = fromIntegral (size @GL.GLushort * length indexBufferContent)
       Foreign.withArray indexBufferContent (flip (GL.glBufferData GL.GL_ELEMENT_ARRAY_BUFFER indexBufferSize) GL.GL_STATIC_DRAW)
   Foreign.alloca $ \vertexBufferIDPtr -> do
@@ -534,31 +541,8 @@ genTriBuffer indices verts = do
       GL.glBindBuffer GL.GL_ARRAY_BUFFER vertexBufferID
       let vertexBufferSize = fromIntegral (size @v * length verts)
       Foreign.withArray verts (flip (GL.glBufferData GL.GL_ARRAY_BUFFER vertexBufferSize) GL.GL_STATIC_DRAW)
-  bufferData @v
-  pure (ObjMetadata { vertexArrayID = vertexArrayObjectID , indexCount = fromIntegral (3 * length indices) })
-
-
-genLineBuffer :: forall v i.(Data.Vector.Storable.Storable v, Vertex v, Integral i) => [(i,i)] -> [v] -> IO ObjMetadata
-genLineBuffer indices verts = do
-  vertexArrayObjectID <- Foreign.alloca $ \idPtr -> do
-      GL.glGenVertexArrays 1 idPtr
-      Foreign.peek idPtr
-  GL.glBindVertexArray vertexArrayObjectID
-  Foreign.alloca $ \indexBufferIDPtr -> do
-      GL.glGenBuffers 1 indexBufferIDPtr
-      indexBufferID <- Foreign.peek indexBufferIDPtr
-      GL.glBindBuffer GL.GL_ELEMENT_ARRAY_BUFFER indexBufferID
-      let indexBufferContent :: [GL.GLushort] = concatMap (\(a,b) -> fromIntegral <$> [a,b]) indices
-      let indexBufferSize = fromIntegral (size @GL.GLuint * length indexBufferContent)
-      Foreign.withArray indexBufferContent (flip (GL.glBufferData GL.GL_ELEMENT_ARRAY_BUFFER indexBufferSize) GL.GL_STATIC_DRAW)
-  Foreign.alloca $ \vertexBufferIDPtr -> do
-      GL.glGenBuffers 1 vertexBufferIDPtr
-      vertexBufferID <- Foreign.peek vertexBufferIDPtr
-      GL.glBindBuffer GL.GL_ARRAY_BUFFER vertexBufferID
-      let vertexBufferSize = fromIntegral (size @v * length verts)
-      Foreign.withArray verts (flip (GL.glBufferData GL.GL_ARRAY_BUFFER vertexBufferSize) GL.GL_STATIC_DRAW)
-  bufferData @v
-  pure (ObjMetadata { vertexArrayID = vertexArrayObjectID , indexCount = fromIntegral (2 * length indices) })
+  configureAttributes @v
+  pure (ObjMetadata { vertexArrayID = vertexArrayObjectID , indexCount = fromIntegral (indexDim @i * length indices) })
 
 
 
@@ -761,7 +745,7 @@ main = do
       Left err -> print err >> System.Exit.exitFailure
       Right teapot -> pure teapot
 
-  let initializeObject obj = genTriBuffer (faces obj) (fmap (\(v,n) -> ColoredNormalVertex (position v) (color v) n) (zipWith (,) (vertices obj) (normals obj)))
+  let initializeObject obj = genBuffer (faces obj) (fmap (\(v,n) -> ColoredNormalVertex (position v) (color v) n) (zipWith (,) (vertices obj) (normals obj)))
   
   cubeMetadata <- initializeObject cubeObj
   pyramidMetadata <- initializeObject pyramidObj
@@ -775,14 +759,32 @@ main = do
         in layout(location=0) vec4 vertexPositionModelSpace;
         in layout(location=1) vec3 normalModelSpace;
         in layout(location=2) vec2 vertex_uv;
+        in layout(location=3) int parentId;
         out vec3 normalWorldSpace;
         out vec2 fragment_uv;
         out vec3 vertexPositionWorldSpace;
+        out vec3 color;
+
+        // Convert HSV → RGB (GLSL 330+)
+        vec3 hsv2rgb(vec3 c) {
+            vec3 K = vec3(1.0, 2.0/3.0, 1.0/3.0);
+            vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - 3.0);
+            return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
+        }
+
+        // Map integer to color
+        vec3 intToColor(int n) {
+            float hue = float(n) / float(60); // evenly spaced [0,1)
+            return hsv2rgb(vec3(hue, 0.8, 0.9)); // S=0.8, V=0.9 for punchy colors
+        }
+        
+
         void main() {
           gl_Position = modelToProjectionMatrix * vertexPositionModelSpace;
           normalWorldSpace = vec3(modelToWorldTransformMatrix * vec4(normalModelSpace,0));
           vertexPositionWorldSpace = vec3(modelToWorldTransformMatrix * vertexPositionModelSpace);
           fragment_uv = vertex_uv;
+          color = intToColor(parentId);
         }
         """
 
@@ -794,6 +796,7 @@ main = do
         in vec3 normalWorldSpace;
         in vec3 vertexPositionWorldSpace;
         in vec2 fragment_uv;
+        in vec3 color;
         out vec4 fragmentColor;
         void main() {
           vec3 lightVectorWorldSpace = normalize(lightPosition - vertexPositionWorldSpace);
@@ -804,7 +807,8 @@ main = do
           float s = pow(clamp(dot(reflectedLightWorldSpace, eyeVectorWorldSpace),0,1),2048);
           vec4 specularLight = vec4(s,s,s,1.0);
           vec4 lighting = clamp(diffuseLight,0.0,1.0) + ambientLight + clamp(specularLight,0,1);
-          fragmentColor = lighting * texture(base_texture,fragment_uv);
+          //fragmentColor = lighting * texture(base_texture,fragment_uv);
+          fragmentColor = vec4(color,1);
         }
         """
 
@@ -868,7 +872,7 @@ main = do
               let smd = zigzagoon {triangles = filter (\v -> material v == matName) (triangles zigzagoon)}
               let smdTris = fmap (\n -> (3*n,3*n+1,3*n+2)) [0..length (triangles smd) - 1]
               let smdVerts = concatMap (\v -> let (a,b,c) = verts v in [a,b,c]) (triangles smd)
-              md <- genTriBuffer smdTris (fmap (\v -> TexturedSkeletonVertex (vPos v) (vNormal v) (vUV v) (vParent v)) smdVerts)
+              md <- genBuffer smdTris (fmap smdToTexturedSkeletonVertex smdVerts)
               pure (textureID,md)
 
   matMap <- sequenceA (Data.Map.Internal.fromSet readTex (Data.Set.fromList (material <$> triangles zigzagoon)))
@@ -889,7 +893,7 @@ main = do
         }
         """
 
-  skelly <- let pose = head (smdPoses zigzagoon) in genLineBuffer (roseEdges pose) (fmap PositionVertex (flattenRose pose))
+  skelly <- let pose = head (smdPoses zigzagoon) in genBuffer (roseEdges pose) (fmap PositionVertex (flattenRose pose))
 
 
   --- MAIN LOOP ----------------------------------------------------------------
