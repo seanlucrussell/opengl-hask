@@ -4,6 +4,7 @@ import           Control.Applicative
 import           Control.Monad (unless,when)
 import           Data.Finite
 import qualified Foreign
+import qualified Data.List
 import           GHC.TypeNats
 import qualified Data.Array
 import qualified Foreign.C.String
@@ -327,10 +328,10 @@ roseEdges =
 flattenRose :: Rose a -> [a]
 flattenRose (Rose a rs) = a:concatMap flattenRose rs
 
-smdPoses :: SMD -> [Rose (Vec 4)]
-smdPoses smd = let go (Rose t ts) = Rose (t (v4 0 0 0 1)) (go <$> ts) in fmap go (smdPoseTransforms smd <$> skeleton smd)
+smdPoses :: SMD -> [Rose (Int, Vec 4)]
+smdPoses smd = let go (Rose (i,t) ts) = Rose (i,t (v4 0 0 0 1)) (go <$> ts) in fmap go (smdPoseTransforms smd <$> skeleton smd)
 
-smdPoseTransforms :: SMD -> SMD_SkeletonFrame -> Rose (Vec 4 -> Vec 4)
+smdPoseTransforms :: SMD -> SMD_SkeletonFrame -> Rose (Int, Vec 4 -> Vec 4)
 smdPoseTransforms smd frame =
   let skeletonIndices = filter (\(a,b) -> a /= -1 && b /= -1) (fmap (\(SMD_Node start _ end) -> (start,end)) (nodes smd))
       childMap = Data.Map.fromListWith (++) ((\(v,k) -> (k,[v])) <$> skeletonIndices)
@@ -343,13 +344,13 @@ smdPoseTransforms smd frame =
                  . rotation (180/pi * rot bone z) (v3 0 0 1)
                  . rotation (180/pi * rot bone y) (v3 0 1 0)
                  . rotation (180/pi * rot bone x) (v3 1 0 0)
-         in Rose newTransform (subtree newTransform <$> maybe [] id (Data.Map.lookup n childMap))
+         in Rose (boneId bone, newTransform) (subtree newTransform <$> maybe [] id (Data.Map.lookup n childMap))
   in subtree id 0
 
 -- would this be better if we represented a pose by `Map Int [Int,Vec 4 -> Vec 4]`
 
 -- really we should distinguish a base pose from an animation. i think the right way to do this is ONE parser for all formats, but then have a postprocessing step that does convention checks for references (e.g. only one time 0) and animations (no triangles) and puts things into more structured data types
-smdReferencePoseTransform :: SMD -> SMD_SkeletonFrame -> Rose (Vec 4 -> Vec 4)
+smdReferencePoseTransform :: SMD -> SMD_SkeletonFrame -> Rose (Int, Vec 4 -> Vec 4)
 smdReferencePoseTransform smd frame =
   let skeletonIndices = filter (\(a,b) -> a /= -1 && b /= -1) (fmap (\(SMD_Node start _ end) -> (start,end)) (nodes smd))
       childMap = Data.Map.fromListWith (++) ((\(v,k) -> (k,[v])) <$> skeletonIndices)
@@ -362,8 +363,58 @@ smdReferencePoseTransform smd frame =
              . rotation (-180/pi * rot bone z) (v3 0 0 1)
              . translate (-pos bone)
              . transform
-       in Rose newTransform (subtree newTransform <$> maybe [] id (Data.Map.lookup n childMap))
+       in Rose (boneId bone, newTransform) (subtree newTransform <$> maybe [] id (Data.Map.lookup n childMap))
   in subtree id 0
+
+refposflat :: SMD -> SMD_SkeletonFrame -> [Vec 4 -> Vec 4]
+refposflat smd frame = fmap snd (Data.List.sortOn fst (flattenRose (smdReferencePoseTransform smd frame)))
+
+animposflat :: SMD -> SMD_SkeletonFrame -> [Vec 4 -> Vec 4]
+animposflat smd frame = fmap snd (Data.List.sortOn fst (flattenRose (smdPoseTransforms smd frame)))
+
+
+
+pose :: SMD -> SMD_SkeletonFrame -> SMD_SkeletonFrame -> [Vec 4 -> Vec 4]
+-- pose smd ref frame = replicate 30 id
+pose smd ref frame = zipWith (.)  (animposflat frame) (refposflat ref)
+  where
+    skeletonIndices = filter (\(a,b) -> a /= -1 && b /= -1) (fmap (\(SMD_Node start _ end) -> (start,end)) (nodes smd))
+    childMap = Data.Map.fromListWith (++) ((\(v,k) -> (k,[v])) <$> skeletonIndices)
+    smdPoseTransforms frame =
+      let subtree transform n =
+             let bone = bones frame !! n
+                 newTransform =
+                     memo
+                     . transform
+                     . memo
+                     . translate (pos bone)
+                     . memo
+                     . rotation (180/pi * rot bone z) (v3 0 0 1)
+                     . memo
+                     . rotation (180/pi * rot bone y) (v3 0 1 0)
+                     . memo
+                     . rotation (180/pi * rot bone x) (v3 1 0 0)
+             in Rose (boneId bone, newTransform) (subtree newTransform <$> maybe [] id (Data.Map.lookup n childMap))
+      in subtree id 0
+    smdReferencePoseTransform frame =
+      let subtree transform n =
+           let bone = bones frame !! n
+               newTransform =
+                 memo
+                 . rotation (-180/pi * rot bone x) (v3 1 0 0)
+                 . memo
+                 . rotation (-180/pi * rot bone y) (v3 0 1 0)
+                 . memo
+                 . rotation (-180/pi * rot bone z) (v3 0 0 1)
+                 . memo
+                 . translate (-pos bone)
+                 . memo
+                 . transform
+           in Rose (boneId bone, newTransform) (subtree newTransform <$> maybe [] id (Data.Map.lookup n childMap))
+      in subtree id 0
+    refposflat frame = fmap snd (Data.List.sortOn fst (flattenRose (smdReferencePoseTransform  frame)))
+    animposflat frame = fmap snd (Data.List.sortOn fst (flattenRose (smdPoseTransforms frame)))
+
 
 -- honestly the simples way to do this is probably to track the vertex id and then pack things into an array after they are built.
 
@@ -756,6 +807,7 @@ main = do
         """#version 430\r\n
         uniform mat4 modelToProjectionMatrix;
         uniform mat4 modelToWorldTransformMatrix;
+        uniform mat4 bones[128];
         in layout(location=0) vec4 vertexPositionModelSpace;
         in layout(location=1) vec3 normalModelSpace;
         in layout(location=2) vec2 vertex_uv;
@@ -765,22 +817,20 @@ main = do
         out vec3 vertexPositionWorldSpace;
         out vec3 color;
 
-        // Convert HSV → RGB (GLSL 330+)
         vec3 hsv2rgb(vec3 c) {
             vec3 K = vec3(1.0, 2.0/3.0, 1.0/3.0);
             vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - 3.0);
             return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
         }
 
-        // Map integer to color
         vec3 intToColor(int n) {
-            float hue = float(n) / float(60); // evenly spaced [0,1)
-            return hsv2rgb(vec3(hue, 0.8, 0.9)); // S=0.8, V=0.9 for punchy colors
+            float hue = float(n) / float(60);
+            return hsv2rgb(vec3(hue, 0.8, 0.9));
         }
         
 
         void main() {
-          gl_Position = modelToProjectionMatrix * vertexPositionModelSpace;
+          gl_Position = modelToProjectionMatrix * bones[parentId] * vertexPositionModelSpace;
           normalWorldSpace = vec3(modelToWorldTransformMatrix * vec4(normalModelSpace,0));
           vertexPositionWorldSpace = vec3(modelToWorldTransformMatrix * vertexPositionModelSpace);
           fragment_uv = vertex_uv;
@@ -818,16 +868,16 @@ main = do
     src <- readFile filename
     case MP.parse pSMD filename src of
       Left err -> print err >> System.Exit.exitFailure
-      Right model -> pure model
+      Right model -> pure (smdscale 0.03 model)
 
   ziganim <- do
     let filename = "resources/Zigzagoon/anims/Action.smd"
     src <- readFile filename
     case MP.parse pSMD filename src of
       Left err -> print err >> System.Exit.exitFailure
-      Right model -> pure (skeleton model)
+      Right model -> pure (skeleton (smdscale 0.03 model))
 
-  let zigzagoon = smdscale 0.03 (zigzagoon' {skeleton = ziganim})
+  let zigzagoon = zigzagoon' {skeleton = ziganim}
 
   -- we should figure out how to deform the skeleton first! then apply the basic principles from that simple situation to the model itself
 
@@ -893,7 +943,7 @@ main = do
         }
         """
 
-  skelly <- let pose = head (smdPoses zigzagoon) in genBuffer (roseEdges pose) (fmap PositionVertex (flattenRose pose))
+  skelly <- let pose = head (smdPoses zigzagoon) in genBuffer (roseEdges pose) (fmap (PositionVertex . snd) (flattenRose pose))
 
 
   --- MAIN LOOP ----------------------------------------------------------------
@@ -949,6 +999,11 @@ main = do
         let zigTransform = (translate (v3 (-2) (-1) (-1)) . rotation 45 (v3 0 1 0) . rotation 90 (v3 (-1) 0 0))        
 
         GL.glUseProgram textureShader
+
+
+        let zigpose = transformToMat <$> pose zigzagoon (head (skeleton zigzagoon')) (head ziganim)
+        bonesloc <- Foreign.C.String.withCString "bones" (GL.glGetUniformLocation textureShader)
+        Foreign.withArray ((zigpose)) (GL.glUniformMatrix4fv bonesloc (fromIntegral $ length zigpose) 1 . Foreign.castPtr)
         setShaderUniform textureShader "ambientLight" (v4 0.3 0.3 0.3 1)
         setShaderUniform textureShader "lightPosition" lightPosition
         setShaderUniform textureShader "eyePosition" (cameraPosition appState . weaken)
