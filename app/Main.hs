@@ -16,7 +16,6 @@ import qualified SDL.Raw.Video
 import qualified System.Random
 
 import qualified System.IO as IO
-import qualified System.Exit
 
 
 import qualified Text.Megaparsec            as MP
@@ -27,7 +26,6 @@ import qualified Data.Char  as Char
 import           Data.Void  (Void)
 import           Control.Applicative ((<|>), optional)
 import qualified Control.Monad (void)
-import qualified System.Exit
 
 import qualified Codec.Picture
 import qualified Data.Vector.Storable
@@ -56,7 +54,11 @@ v2 :: Float -> Float -> Vec 2;                   v2 x y i = case i of {0->x;1->y
 v3 :: Float -> Float -> Float -> Vec 3;          v3 x y z i = case i of {0->x;1->y;2->z}
 v4 :: Float -> Float -> Float -> Float -> Vec 4; v4 x y z w i = case i of {0->x;1->y;2->z;3->w}
 
-instance KnownNat n => Show (Vec n) where show v = "v" ++ show (1+fromIntegral (maxBound :: Finite n)) ++ show (v <$> finites)
+a2 :: a -> a -> Array 2 a;           a2 x y i = case i of {0->x;1->y}
+a3 :: a -> a -> a -> Array 3 a;      a3 x y z i = case i of {0->x;1->y;2->z}
+a4 :: a -> a -> a -> a -> Array 4 a; a4 x y z w i = case i of {0->x;1->y;2->z;3->w}
+
+instance (KnownNat n,Show a) => Show (Array n a) where show v = "v" ++ show (1+fromIntegral (maxBound :: Finite n)) ++ show (v <$> finites)
 
 instance Num (Vec n) where
   (+) = liftA2 (+)
@@ -471,25 +473,44 @@ roundUp :: Int -> Int -> Int
 roundUp val base = (val + base - 1) `div` base * base
 
 smdToTexturedSkeletonVertex :: SMD_Vertex -> TexturedSkeletonVertex
-smdToTexturedSkeletonVertex v = TexturedSkeletonVertex (vPos v) (vNormal v) (vUV v) (fromIntegral (fst (head (vWeights v))))
+smdToTexturedSkeletonVertex v =
+   TexturedSkeletonVertex
+     (vPos v)
+     (vNormal v)
+     (vUV v)
+     (case vWeights v of
+        [(x,_),(y,_),(z,_),(w,_)] -> fromIntegral <$> a4 x y z w
+        [(x,_),(y,_),(z,_)] -> fromIntegral <$> a4 x y z (-1)
+        [(x,_),(y,_)] -> fromIntegral <$> a4 x y (-1) (-1)
+        [(x,_)] -> fromIntegral <$> a4 x (-1) (-1) (-1)
+        _ -> fromIntegral <$> a4 (-1) (-1) (-1) (-1))
+     (case vWeights v of
+        [(_,x),(_,y),(_,z),(_,w)] -> v4 x y z w
+        [(_,x),(_,y),(_,z)] -> v4 x y z (-1)
+        [(_,x),(_,y)] -> v4 x y (-1) (-1)
+        [(_,x)] -> v4 x (-1) (-1) (-1)
+        _ -> v4 (-1) (-1) (-1) (-1))
 
-data TexturedSkeletonVertex = TexturedSkeletonVertex (Vec 3) (Vec 3) (Vec 2) GL.GLint deriving (Show)
-instance Vertex TexturedSkeletonVertex where layout = [(3,GL.GL_FLOAT),(3,GL.GL_FLOAT),(2,GL.GL_FLOAT),(1,GL.GL_INT)]
+data TexturedSkeletonVertex = TexturedSkeletonVertex (Vec 3) (Vec 3) (Vec 2) (Array 4 GL.GLint) (Vec 4) deriving (Show)
+instance Vertex TexturedSkeletonVertex where layout = [(3,GL.GL_FLOAT),(3,GL.GL_FLOAT),(2,GL.GL_FLOAT),(4,GL.GL_INT),(4,GL.GL_FLOAT)]
 instance Data.Vector.Storable.Storable TexturedSkeletonVertex where
-  sizeOf _ = roundUp (sum [size @(Vec 3), size @(Vec 3), size @(Vec 2), size @GL.GLint]) (alignment @TexturedSkeletonVertex)
-  alignment _ = maximum [alignment @(Vec 3), alignment @(Vec 3), alignment @(Vec 2), alignment @GL.GLint]
+  sizeOf _ = roundUp (sum [size @(Vec 3), size @(Vec 3), size @(Vec 2), size @(Array 4 GL.GLint), size @(Vec 4)]) (alignment @TexturedSkeletonVertex)
+  alignment _ = maximum [alignment @(Vec 3), alignment @(Vec 3), alignment @(Vec 2), alignment @(Array 4 GL.GLint), alignment @(Vec 4)]
   peek p =
     TexturedSkeletonVertex
-       <$> Foreign.peekByteOff p (0 * size @GL.GLfloat)
-       <*> Foreign.peekByteOff p (3 * size @GL.GLfloat)
-       <*> Foreign.peekByteOff p (6 * size @GL.GLfloat)
-       <*> Foreign.peekByteOff p (8 * size @GL.GLfloat)
-  poke p (TexturedSkeletonVertex a b c d) = do
-      Foreign.pokeByteOff p (0 * size @GL.GLfloat) a
-      Foreign.pokeByteOff p (3 * size @GL.GLfloat) b
-      Foreign.pokeByteOff p (6 * size @GL.GLfloat) c
-      Foreign.pokeByteOff p (8 * size @GL.GLfloat) d
+       <$> Foreign.peekByteOff p (0                                                                           )
+       <*> Foreign.peekByteOff p (0 + size @(Vec 3)                                                           )
+       <*> Foreign.peekByteOff p (0 + size @(Vec 3) + size @(Vec 3)                                           )
+       <*> Foreign.peekByteOff p (0 + size @(Vec 3) + size @(Vec 3) + size @(Vec 2)                           )
+       <*> Foreign.peekByteOff p (0 + size @(Vec 3) + size @(Vec 3) + size @(Vec 2) + size @(Array 4 GL.GLint))
+  poke p (TexturedSkeletonVertex a b c d e) = do
+      Foreign.pokeByteOff p (0                                                                           ) a
+      Foreign.pokeByteOff p (0 + size @(Vec 3)                                                           ) b
+      Foreign.pokeByteOff p (0 + size @(Vec 3) + size @(Vec 3)                                           ) c
+      Foreign.pokeByteOff p (0 + size @(Vec 3) + size @(Vec 3) + size @(Vec 2)                           ) d
+      Foreign.pokeByteOff p (0 + size @(Vec 3) + size @(Vec 3) + size @(Vec 2) + size @(Array 4 GL.GLint)) e
 
+-- ideally this should be some kind of running accumulator with alignments. lets see if it works as-is tho
 
 data ColoredNormalVertex = ColoredNormalVertex (Vec 3) (Vec 3) (Vec 3) deriving (Show)
 instance Vertex ColoredNormalVertex where layout = [(3,GL.GL_FLOAT),(3,GL.GL_FLOAT),(3,GL.GL_FLOAT)]
@@ -712,8 +733,7 @@ main = do
               Foreign.allocaArray (fromIntegral infoLogLength) $ \logPtr -> do
                 GL.glGetShaderInfoLog vertexShaderID infoLogLength Foreign.nullPtr logPtr
                 errorMessage <- Foreign.C.String.peekCString logPtr
-                putStrLn errorMessage
-                System.Exit.exitFailure
+                error errorMessage
         GL.glAttachShader programID vertexShaderID
         GL.glDeleteShader vertexShaderID
         fragmentShaderID <- GL.glCreateShader GL.GL_FRAGMENT_SHADER
@@ -730,8 +750,7 @@ main = do
               Foreign.allocaArray (fromIntegral infoLogLength) $ \logPtr -> do
                 GL.glGetShaderInfoLog fragmentShaderID infoLogLength Foreign.nullPtr logPtr
                 errorMessage <- Foreign.C.String.peekCString logPtr
-                putStrLn errorMessage
-                System.Exit.exitFailure
+                error errorMessage
         GL.glAttachShader programID fragmentShaderID
         GL.glDeleteShader fragmentShaderID
         GL.glLinkProgram programID
@@ -745,8 +764,7 @@ main = do
               Foreign.allocaArray (fromIntegral infoLogLength) $ \logPtr -> do
                 GL.glGetProgramInfoLog programID infoLogLength Foreign.nullPtr logPtr
                 errorMessage <- Foreign.C.String.peekCString logPtr
-                putStrLn errorMessage
-                System.Exit.exitFailure
+                error errorMessage
         pure programID
 
 
@@ -793,7 +811,7 @@ main = do
     let filename = "resources/teapot.obj"
     src <- readFile filename
     case MP.parse pObj filename src of
-      Left err -> print err >> System.Exit.exitFailure
+      Left err -> error (show err)
       Right teapot -> pure teapot
 
   let initializeObject obj = genBuffer (faces obj) (fmap (\(v,n) -> ColoredNormalVertex (position v) (color v) n) (zipWith (,) (vertices obj) (normals obj)))
@@ -811,7 +829,8 @@ main = do
         in layout(location=0) vec4 vertexPositionModelSpace;
         in layout(location=1) vec3 normalModelSpace;
         in layout(location=2) vec2 vertex_uv;
-        in layout(location=3) int parentId;
+        in layout(location=3) ivec4 parentId;
+        in layout(location=4) vec4 weights;
         out vec3 normalWorldSpace;
         out vec2 fragment_uv;
         out vec3 vertexPositionWorldSpace;
@@ -830,11 +849,30 @@ main = do
         
 
         void main() {
-          gl_Position = modelToProjectionMatrix * bones[parentId] * vertexPositionModelSpace;
+          //vec4 posePosition =
+          //    weights[0] * bones[parentId[0]] * vertexPositionModelSpace
+          //  + weights[1] * bones[parentId[1]] * vertexPositionModelSpace
+          //  + weights[2] * bones[parentId[2]] * vertexPositionModelSpace
+          //  + weights[3] * bones[parentId[3]] * vertexPositionModelSpace;
+          vec4 posePosition = vec4(0);
+          if (parentId[0] != -1) {
+              posePosition += weights[0] * bones[parentId[0]] * vertexPositionModelSpace;
+          }
+          if (parentId[1] != -1) {
+              posePosition += weights[1] * bones[parentId[1]] * vertexPositionModelSpace;
+          }
+          if (parentId[2] != -1) {
+              posePosition += weights[2] * bones[parentId[2]] * vertexPositionModelSpace;
+          }
+          if (parentId[3] != -1) {
+              posePosition += weights[3] * bones[parentId[3]] * vertexPositionModelSpace;
+          }
+          gl_Position = modelToProjectionMatrix * posePosition;
           normalWorldSpace = vec3(modelToWorldTransformMatrix * vec4(normalModelSpace,0));
           vertexPositionWorldSpace = vec3(modelToWorldTransformMatrix * vertexPositionModelSpace);
           fragment_uv = vertex_uv;
-          color = intToColor(parentId);
+          //color = weights.xyz;
+          color = intToColor(parentId[0]);
         }
         """
 
@@ -857,35 +895,33 @@ main = do
           float s = pow(clamp(dot(reflectedLightWorldSpace, eyeVectorWorldSpace),0,1),2048);
           vec4 specularLight = vec4(s,s,s,1.0);
           vec4 lighting = clamp(diffuseLight,0.0,1.0) + ambientLight + clamp(specularLight,0,1);
-          //fragmentColor = lighting * texture(base_texture,fragment_uv);
-          fragmentColor = vec4(color,1);
+          fragmentColor = lighting * texture(base_texture,fragment_uv);
+          //fragmentColor = vec4(color,1);
         }
         """
 
 
-  zigzagoon' <- do
+  zigzagoon <- do
     let filename = "resources/Zigzagoon/Zigzagoon.SMD"
     src <- readFile filename
     case MP.parse pSMD filename src of
-      Left err -> print err >> System.Exit.exitFailure
+      Left err -> error (show err)
       Right model -> pure (smdscale 0.03 model)
 
   ziganim <- do
     let filename = "resources/Zigzagoon/anims/Action.smd"
     src <- readFile filename
     case MP.parse pSMD filename src of
-      Left err -> print err >> System.Exit.exitFailure
-      Right model -> pure (skeleton (smdscale 0.03 model))
+      Left err -> error (show err)
+      Right model -> pure (smdscale 0.03 model)
 
-  let zigzagoon = zigzagoon' {skeleton = ziganim}
 
   -- we should figure out how to deform the skeleton first! then apply the basic principles from that simple situation to the model itself
 
   let readTex matName = do
-          print matName
           tex <- Codec.Picture.readImage ("resources/Zigzagoon/images/" ++ matName)
           case tex of
-            Left err -> print err >> System.Exit.exitFailure
+            Left err -> error err
             Right pic -> do
               let img = Codec.Picture.convertRGBA8 pic
 
@@ -943,12 +979,12 @@ main = do
         }
         """
 
-  skelly <- let pose = head (smdPoses zigzagoon) in genBuffer (roseEdges pose) (fmap (PositionVertex . snd) (flattenRose pose))
+  skelly <- let pose = head $ tail (smdPoses ziganim) in genBuffer (roseEdges pose) (fmap (PositionVertex . snd) (flattenRose pose))
 
 
   --- MAIN LOOP ----------------------------------------------------------------
   
-  let loop prevAppState = do
+  let loop prevAppState animState = do
 
 
         --- HANDLE EVENTS ------------------------------------------------------
@@ -996,14 +1032,14 @@ main = do
         drawTriangulation basicShader planeMetadata (translate (v3 0 (-2) (-4)))
         drawTriangulation basicShader teapotMetadata (translate (v3 (3) 1 (-8)))
 
-        let zigTransform = (translate (v3 (-2) (-1) (-1)) . rotation 45 (v3 0 1 0) . rotation 90 (v3 (-1) 0 0))        
+        let zigTransform = (translate (v3 (-2) (-2) (-1)) . rotation 45 (v3 0 1 0) . rotation 90 (v3 (-1) 0 0))        
 
         GL.glUseProgram textureShader
 
 
-        let zigpose = transformToMat <$> pose zigzagoon (head (skeleton zigzagoon')) (head ziganim)
+        let zigpose = transformToMat <$> pose zigzagoon (head (skeleton zigzagoon)) (head animState)
         bonesloc <- Foreign.C.String.withCString "bones" (GL.glGetUniformLocation textureShader)
-        Foreign.withArray ((zigpose)) (GL.glUniformMatrix4fv bonesloc (fromIntegral $ length zigpose) 1 . Foreign.castPtr)
+        Foreign.withArray zigpose (GL.glUniformMatrix4fv bonesloc (fromIntegral $ length zigpose) 1 . Foreign.castPtr)
         setShaderUniform textureShader "ambientLight" (v4 0.3 0.3 0.3 1)
         setShaderUniform textureShader "lightPosition" lightPosition
         setShaderUniform textureShader "eyePosition" (cameraPosition appState . weaken)
@@ -1019,12 +1055,12 @@ main = do
         GL.glUseProgram skellyShader
         GL.glBindVertexArray (vertexArrayID skelly)
         setShaderUniform skellyShader "modelToProjectionMatrix" (toScreenspace zigTransform)
-        GL.glDrawElements GL.GL_LINES (indexCount skelly) GL.GL_UNSIGNED_SHORT Foreign.nullPtr
+        -- GL.glDrawElements GL.GL_LINES (indexCount skelly) GL.GL_UNSIGNED_SHORT Foreign.nullPtr
         
 
-        unless (timeToQuit appState) (loop appState)
+        unless (timeToQuit appState) (loop appState (tail animState))
 
-  loop initialAppState
+  loop initialAppState (cycle (skeleton ziganim))
 
 
   --- CLEANUP ------------------------------------------------------------------
