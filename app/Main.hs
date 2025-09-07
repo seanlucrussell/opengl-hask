@@ -3,36 +3,26 @@ module Main where
 import           Control.Applicative
 import           Control.Monad (unless,when)
 import           Data.Finite
-import qualified Foreign
-import qualified Data.List
 import           GHC.TypeNats
+import qualified Codec.Picture
+import qualified Control.Monad (void)
 import qualified Data.Array
+import qualified Data.Char
+import qualified Data.List
+import qualified Data.Map
+import qualified Data.Map.Internal
+import qualified Data.Set
+import qualified Data.Vector.Storable
+import qualified Foreign
 import qualified Foreign.C.String
-import qualified Graphics.GL.Core46 as GL
+import qualified Graphics.GL.Core46         as GL
 import qualified SDL
 import qualified SDL.Raw.Event
 import qualified SDL.Raw.Video
-
 import qualified System.Random
-
-import qualified System.IO as IO
-
-
 import qualified Text.Megaparsec            as MP
 import qualified Text.Megaparsec.Char       as C
 import qualified Text.Megaparsec.Char.Lexer as L
-
-import qualified Data.Char  as Char
-import           Data.Void  (Void)
-import           Control.Applicative ((<|>), optional)
-import qualified Control.Monad (void)
-
-import qualified Codec.Picture
-import qualified Data.Vector.Storable
-
-import qualified Data.Set
-import qualified Data.Map
-import qualified Data.Map.Internal
 
 
 --- LINEAR ALGEBRA LIBRARY -----------------------------------------------------
@@ -50,9 +40,9 @@ r :: (KnownNat n, 1 <= n) => Finite n; r = 0
 g :: (KnownNat n, 2 <= n) => Finite n; g = 1
 b :: (KnownNat n, 3 <= n) => Finite n; b = 2
 
-v2 :: Float -> Float -> Vec 2;                   v2 x y i = case i of {0->x;1->y}
-v3 :: Float -> Float -> Float -> Vec 3;          v3 x y z i = case i of {0->x;1->y;2->z}
-v4 :: Float -> Float -> Float -> Float -> Vec 4; v4 x y z w i = case i of {0->x;1->y;2->z;3->w}
+v2 :: Float -> Float -> Vec 2;                   v2 = a2
+v3 :: Float -> Float -> Float -> Vec 3;          v3 = a3
+v4 :: Float -> Float -> Float -> Float -> Vec 4; v4 = a4
 
 a2 :: a -> a -> Array 2 a;           a2 x y i = case i of {0->x;1->y}
 a3 :: a -> a -> a -> Array 3 a;      a3 x y z i = case i of {0->x;1->y;2->z}
@@ -72,36 +62,48 @@ instance Fractional (Vec n) where
   fromRational = pure . fromRational
   (/) = liftA2 (/)
 
+instance Floating (Vec n) where
+  cos = fmap cos
+  sin = fmap sin
+  pi = pure pi
+  exp = fmap exp
+  log = fmap log
+  asin = fmap asin
+  acos = fmap acos
+  atan = fmap atan
+  sinh = fmap sinh
+  cosh = fmap cosh
+  asinh = fmap asinh
+  acosh = fmap acosh
+  atanh = fmap atanh
+
 translate :: Vec 3 -> Vec 4 -> Vec 4
-translate d v 0 = v w * d x + v x
-translate d v 1 = v w * d y + v y
-translate d v 2 = v w * d z + v z
-translate d v 3 = v w
+translate d v = pure (v w) * (maybe 0 d . strengthen) + v
 
 projection :: Float -> Float -> Float -> Float -> Vec 4 -> Vec 4
-projection fov aspect near far v 0 = v x / (aspect * tan (pi*fov/360))
-projection fov aspect near far v 1 = v y / tan (pi*fov/360)
-projection fov aspect near far v 2 = -(v z*(far+near) + v w*2*far*near)/(far-near)
-projection fov aspect near far v 3 = -v z
+projection fov aspect near far v =
+  v4 (v x / (aspect * tan (pi*fov/360)))
+     (v y /           tan (pi*fov/360))
+     ((near*v z + far*v z + 2*near*far*v w)/(near-far))
+     (-v z)
+
+append v x = maybe x v . strengthen
 
 rotation :: Float -> Vec 3 -> Vec 4 -> Vec 4
-rotation angle axis v i =
+rotation angle axis v =
   let
-    theta = pi * angle / 180
-    u :: Vec 3 = memo (normalize axis)
-  in case i of
-    0 -> v x*cos theta + (u y*v z - u z*v y) * sin theta + u x*(u x*v x + u y*v y + u z*v z)*(1 - cos theta)
-    1 -> v y*cos theta + (u z*v x - u x*v z) * sin theta + u y*(u x*v x + u y*v y + u z*v z)*(1 - cos theta)
-    2 -> v z*cos theta + (u x*v y - u y*v x) * sin theta + u z*(u x*v x + u y*v y + u z*v z)*(1 - cos theta)
-    3 -> v w
+    theta = pure (pi * angle / 180)
+    u     = normalize axis
+    v'    = v . weaken
+  in append (cos theta*v' + sin theta*(u `cross` v') + (1-cos theta)*pure (u`dot`v')*u) (v w)
 
 transformToMat :: (KnownNat m, KnownNat n) => (Vec n -> Vec m) -> Mat m n
 transformToMat f row column = f (\k -> if k == column then 1 else 0) row
 
 contract :: KnownNat n => Vec n -> Float; contract v = sum (v <$> finites)
-dot v1 v2 = contract (\k -> v1 k * v2 k)
+dot v1 v2 = contract (v1 * v2)
 magnitude v = sqrt (v `dot` v)
-normalize :: KnownNat n => Vec n -> Vec n; normalize v = (/(magnitude v)) . v
+normalize :: KnownNat n => Vec n -> Vec n; normalize v = v / pure (magnitude v)
 
 identity i j = if i == j then 1 else 0
 
@@ -109,23 +111,19 @@ cross :: Vec 3 -> Vec 3 -> Vec 3
 cross a b i = a (i+1) * b (i+2) - b (i+1) * a (i+2) 
 
 lookAt :: Vec 3 -> Vec 3 -> Vec 3 -> Vec 4 -> Vec 4
-lookAt eye center up v i =
+lookAt eye center up v =
   let
-    v' = v3 (v x) (v y) (v z)
-    f = normalize (center - eye)
-    r = normalize (cross f up)     -- right  (s  in glm docs)
-    u =         (cross r f)        -- true up
-    tR = - dot r eye               -- translation components
-    tU = - dot u eye
-    tF =   dot f eye
-  in case i of
-       0 ->  dot r v' + tR * v w     -- x′
-       1 ->  dot u v' + tU * v w     -- y′
-       2 -> -dot f v' + tF * v w     -- z′  (note the minus)
-       3 ->  v w                    -- w′
+    v' = v . weaken
+    f = normalize (eye - center)
+    r = normalize (cross up f)
+    u = normalize (cross f r)
+  in v4 (dot r v' - dot r eye * v w)
+        (dot u v' - dot u eye * v w)
+        (dot f v' - dot f eye * v w)
+        (                       v w)
 
 worldToViewMatrix :: Vec 3 -> Vec 3 -> Vec 4 -> Vec 4
-worldToViewMatrix position viewDirection = lookAt position (\k -> position k + viewDirection k) (v3 0 1 0)
+worldToViewMatrix position viewDirection = lookAt position (position + viewDirection) (v3 0 1 0)
 
 memo :: forall a. KnownNat a => Vec a -> Vec a
 memo v = (Data.Array.!) (Data.Array.listArray (0, fromIntegral (maxBound :: Finite a)) (map v finites)) . fromIntegral
@@ -133,7 +131,7 @@ memo v = (Data.Array.!) (Data.Array.listArray (0, fromIntegral (maxBound :: Fini
 
 --- OBJ PARSER -----------------------------------------------------------------
 
-type Parser = MP.Parsec Void String
+type Parser = MP.Parsec () String
 type Face = (Int, Int, Int)
 data OBJ_Vertex = OBJ_Vertex {position :: Vec 3, color :: Vec 3} deriving Show
 data Obj = Obj { vertices :: [OBJ_Vertex], faces :: [Face] } deriving Show
@@ -141,7 +139,7 @@ data Obj = Obj { vertices :: [OBJ_Vertex], faces :: [Face] } deriving Show
 pObj :: Parser Obj
 pObj =
   let
-    hspace1 = Control.Monad.void $ MP.some (MP.satisfy Char.isSpace) :: Parser ()
+    hspace1 = Control.Monad.void $ MP.some (MP.satisfy Data.Char.isSpace) :: Parser ()
     float = L.signed (pure ()) L.float :: Parser Float
     vertexLine :: Parser (Obj -> Obj) = do
       C.char 'v'
@@ -909,7 +907,7 @@ main = do
       Right model -> pure (smdscale 0.03 model)
 
   ziganim <- do
-    let filename = "resources/Zigzagoon/anims/Action.smd"
+    let filename = "resources/Zigzagoon/anims/Bounce.smd"
     src <- readFile filename
     case MP.parse pSMD filename src of
       Left err -> error (show err)
