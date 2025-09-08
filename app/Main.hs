@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings,LinearTypes,ScopedTypeVariables,OverloadedStrings,MultilineStrings,DataKinds,TypeOperators,FlexibleInstances,UndecidableInstances,TypeApplications,AllowAmbiguousTypes,GADTs,TypeFamilies #-}
+{-# LANGUAGE OverloadedStrings,LinearTypes,ScopedTypeVariables,MultilineStrings,DataKinds,TypeOperators,FlexibleInstances,UndecidableInstances,TypeApplications,AllowAmbiguousTypes,GADTs,TypeFamilies #-}
 module Main where
 import           Control.Applicative
 import           Control.Monad (unless,when)
@@ -173,9 +173,9 @@ normals obj =
 normalModel :: Obj -> [OBJ_Vertex]
 normalModel obj = do
   (normal,vert) <- zip (normals obj) (vertices obj)
-  ([ OBJ_Vertex { position = position vert, color = v3 1 1 1 }
+  [  OBJ_Vertex { position = position vert, color = v3 1 1 1 }
    , OBJ_Vertex { position = position vert + 0.3 * normal, color = v3 1 1 1 }
-   ])
+   ]
 
 cubeObj = Obj
   { vertices =
@@ -248,7 +248,7 @@ planeObj =
     let x = fromIntegral (i `mod` planeWidth)
     let y = fromIntegral (i `div` planeHeight)
     let intPairInject y = let t n = if n<0 then -2*n-1 else 2*n; a=t i; b=t (seed+y) in (a+b)*(a+b+1)`div`2+b
-    let randColor idx = (fst (System.Random.uniformR (0,1) (System.Random.mkStdGen (intPairInject idx))))
+    let randColor idx = fst (System.Random.uniformR (0,1) (System.Random.mkStdGen (intPairInject idx)))
     pure (OBJ_Vertex
         { position = v3 (x - fromIntegral planeWidth / 2) 0 (y - fromIntegral planeHeight / 2)
         , color = v3 (randColor 0) (randColor 1) (randColor 2)
@@ -289,28 +289,27 @@ pSMD =
     stringLiteral = lexeme (C.char '"' *> MP.manyTill L.charLiteral (C.char '"')) :: Parser String
     vec2          = v2 <$> float <*> float
     vec3          = v3 <$> float <*> float <*> float
-    weights = optional integer >>= maybe (pure []) (flip MP.count ((,) <$> integer <*> float))
-    pVertex = lexeme $ SMD_Vertex <$> integer <*> vec3 <*> vec3 <*> vec2 <*> weights
-  in do
-  symbol "version" >> integer
-  ns <- symbol "nodes" >>
-        MP.manyTill
-           (lexeme (SMD_Node <$> integer <*> stringLiteral <*> integer))
-        (symbol "end")     
-  sk <- symbol "skeleton" >>
-        MP.manyTill
-           (symbol "time" >> SMD_SkeletonFrame <$>
-            integer <*>
-            MP.many (lexeme (SMD_BoneFrame <$> integer <*> vec3 <*> vec3)))
-        (symbol "end")
-  ts <- MP.optional
-        (symbol "triangles" >>
-         MP.manyTill (lexeme (SMD_Triangle <$>
-              lexeme (MP.someTill MP.anySingle C.eol) <*>
-              ((,,) <$> pVertex <*> pVertex <*> pVertex)))
-         (symbol "end"))
-  MP.eof
-  pure (SMD ns sk (maybe [] id ts))
+    weights = optional integer >>= maybe (pure []) (`MP.count` ((,) <$> integer <*> float))
+    pVertex = lexeme (SMD_Vertex <$> integer <*> vec3 <*> vec3 <*> vec2 <*> weights)
+  in 
+  SMD <$> (symbol "version" >> integer >>
+           symbol "nodes" >>
+           MP.manyTill
+              (lexeme (SMD_Node <$> integer <*> stringLiteral <*> integer))
+          (symbol "end"))
+      <*> (symbol "skeleton" >>
+           MP.manyTill
+              (symbol "time" >> SMD_SkeletonFrame <$>
+               integer <*>
+               MP.many (lexeme (SMD_BoneFrame <$> integer <*> vec3 <*> vec3)))
+          (symbol "end"))
+      <*> (maybe [] id <$> MP.optional
+          (symbol "triangles" >>
+           MP.manyTill (lexeme (SMD_Triangle <$>
+                lexeme (MP.someTill MP.anySingle C.eol) <*>
+                ((,,) <$> pVertex <*> pVertex <*> pVertex)))
+          (symbol "end"))
+        <* MP.eof)
 
 data Rose a = Rose a [Rose a] deriving (Show)
 
@@ -347,8 +346,6 @@ smdPoseTransforms smd frame =
          in Rose (boneId bone, newTransform) (subtree newTransform <$> maybe [] id (Data.Map.lookup n childMap))
   in subtree id 0
 
--- would this be better if we represented a pose by `Map Int [Int,Vec 4 -> Vec 4]`
-
 -- really we should distinguish a base pose from an animation. i think the right way to do this is ONE parser for all formats, but then have a postprocessing step that does convention checks for references (e.g. only one time 0) and animations (no triangles) and puts things into more structured data types
 smdReferencePoseTransform :: SMD -> SMD_SkeletonFrame -> Rose (Int, Vec 4 -> Vec 4)
 smdReferencePoseTransform smd frame =
@@ -372,10 +369,7 @@ refposflat smd frame = fmap snd (Data.List.sortOn fst (flattenRose (smdReference
 animposflat :: SMD -> SMD_SkeletonFrame -> [Vec 4 -> Vec 4]
 animposflat smd frame = fmap snd (Data.List.sortOn fst (flattenRose (smdPoseTransforms smd frame)))
 
-
-
 pose :: SMD -> SMD_SkeletonFrame -> SMD_SkeletonFrame -> [Vec 4 -> Vec 4]
--- pose smd ref frame = replicate 30 id
 pose smd ref frame = zipWith (.)  (animposflat frame) (refposflat ref)
   where
     skeletonIndices = filter (\(a,b) -> a /= -1 && b /= -1) (fmap (\(SMD_Node start _ end) -> (start,end)) (nodes smd))
@@ -416,36 +410,7 @@ pose smd ref frame = zipWith (.)  (animposflat frame) (refposflat ref)
     animposflat frame = fmap snd (Data.List.sortOn fst (flattenRose (smdPoseTransforms frame)))
 
 
--- honestly the simples way to do this is probably to track the vertex id and then pack things into an array after they are built.
-
-
--- challenge: keeping indices synced. the vertex attributes have to reference the same pose transforms as the references. so maybe we really SHOULD do a map-based op
---
--- cuz we only need the tree for visualizing right? for linking and visualizing. we should preserve the other stuff
---
--- err rather than map, this is really a list right? or array?
---
--- better for doing type level stuff if we ever get there too.
-
--- test: composition of reference pose as base and reference pose as anim should yield no change
--- test: uploadign a const noop to the ubo or whatever shouldn't do anything either
-
--- practically this should be a tree of vector-vector transformations that transform from some local space into global space
-
-
 --- GL UTILS -------------------------------------------------------------------
-
--- okay so configureing an attribute. we got attribute index, size, type. from these we can compute stride, buffer offset, etc
--- index is presumet do start from 0
-
-type Attribute = (GL.GLint, GL.GLenum)
-
--- possibly should have our own enum for this. if nothing else then just to track what has been implemented so far
-enumSize :: Integral i => GL.GLenum -> i
-enumSize GL.GL_FLOAT = fromIntegral $ size @GL.GLfloat
-enumSize GL.GL_INT = fromIntegral $ size @GL.GLint
-
-data ObjMetadata = ObjMetadata { vertexArrayID :: GL.GLuint, indexCount :: GL.GLsizei } deriving Show
 
 class SetUniform u where setUniform :: GL.GLint -> u -> IO ()
 instance SetUniform (Vec 2) where setUniform loc v = Foreign.with v (GL.glUniform2fv loc 1 . Foreign.castPtr)
@@ -454,21 +419,10 @@ instance SetUniform (Vec 4) where setUniform loc v = Foreign.with v (GL.glUnifor
 instance SetUniform (Mat 4 4) where setUniform loc m = Foreign.with m (GL.glUniformMatrix4fv loc 1 1 . Foreign.castPtr)
 instance SetUniform (Vec 4 -> Vec 4) where setUniform loc = setUniform loc . transformToMat
 
-class Vertex v where layout :: [Attribute]
-instance KnownNat n => Vertex (Vec n) where layout = [(fromIntegral (maxBound :: Finite n)+1,GL.GL_FLOAT)]
-
-
-instance (Data.Vector.Storable.Storable s, KnownNat n) => Data.Vector.Storable.Storable (Array n s) where
-  sizeOf _ = (1+fromIntegral (maxBound :: Finite n)) * size @s
-  alignment _ = alignment @s
-  peek p = do
-    let n = fromIntegral (maxBound :: Finite n)
-    xs <- Foreign.peekArray n (Foreign.castPtr p)
-    pure (Data.Vector.Storable.unsafeIndex (Data.Vector.Storable.fromListN n xs) . fromIntegral . getFinite)
-  poke p f = mapM_ (\i -> Foreign.pokeElemOff (Foreign.castPtr p) (fromIntegral i) (f i)) (finites @n)
-
-roundUp :: Int -> Int -> Int
-roundUp val base = (val + base - 1) `div` base * base
+setShaderUniform :: SetUniform u => GL.GLuint -> String -> u -> IO ()
+setShaderUniform programID uniformName value = do
+  uniformLoc <- Foreign.C.String.withCString uniformName (GL.glGetUniformLocation programID)
+  setUniform uniformLoc value
 
 smdToTexturedSkeletonVertex :: SMD_Vertex -> TexturedSkeletonVertex
 smdToTexturedSkeletonVertex v =
@@ -489,96 +443,235 @@ smdToTexturedSkeletonVertex v =
         [(_,x)] -> v4 x (-1) (-1) (-1)
         _ -> v4 (-1) (-1) (-1) (-1))
 
-data TexturedSkeletonVertex = TexturedSkeletonVertex (Vec 3) (Vec 3) (Vec 2) (Array 4 GL.GLint) (Vec 4) deriving (Show)
-instance Vertex TexturedSkeletonVertex where layout = [(3,GL.GL_FLOAT),(3,GL.GL_FLOAT),(2,GL.GL_FLOAT),(4,GL.GL_INT),(4,GL.GL_FLOAT)]
-instance Data.Vector.Storable.Storable TexturedSkeletonVertex where
-  sizeOf _ = roundUp (sum [size @(Vec 3), size @(Vec 3), size @(Vec 2), size @(Array 4 GL.GLint), size @(Vec 4)]) (alignment @TexturedSkeletonVertex)
-  alignment _ = maximum [alignment @(Vec 3), alignment @(Vec 3), alignment @(Vec 2), alignment @(Array 4 GL.GLint), alignment @(Vec 4)]
-  peek p =
-    TexturedSkeletonVertex
-       <$> Foreign.peekByteOff p (0                                                                           )
-       <*> Foreign.peekByteOff p (0 + size @(Vec 3)                                                           )
-       <*> Foreign.peekByteOff p (0 + size @(Vec 3) + size @(Vec 3)                                           )
-       <*> Foreign.peekByteOff p (0 + size @(Vec 3) + size @(Vec 3) + size @(Vec 2)                           )
-       <*> Foreign.peekByteOff p (0 + size @(Vec 3) + size @(Vec 3) + size @(Vec 2) + size @(Array 4 GL.GLint))
-  poke p (TexturedSkeletonVertex a b c d e) = do
-      Foreign.pokeByteOff p (0                                                                           ) a
-      Foreign.pokeByteOff p (0 + size @(Vec 3)                                                           ) b
-      Foreign.pokeByteOff p (0 + size @(Vec 3) + size @(Vec 3)                                           ) c
-      Foreign.pokeByteOff p (0 + size @(Vec 3) + size @(Vec 3) + size @(Vec 2)                           ) d
-      Foreign.pokeByteOff p (0 + size @(Vec 3) + size @(Vec 3) + size @(Vec 2) + size @(Array 4 GL.GLint)) e
 
--- ideally this should be some kind of running accumulator with alignments. lets see if it works as-is tho
+--- ATTRIBUTE TYPES ------------------------------------------------------------
+
+data AttributeEnum
+   = Attrib_vec2
+   | Attrib_vec3
+   | Attrib_vec4
+   | Attrib_ivec2
+   | Attrib_ivec3
+   | Attrib_ivec4
+   deriving Show
+
+attribAlignment :: AttributeEnum -> Int
+attribAlignment Attrib_vec2 = alignment @(Array 2 GL.GLfloat)
+attribAlignment Attrib_vec3 = alignment @(Array 3 GL.GLfloat)
+attribAlignment Attrib_vec4 = alignment @(Array 4 GL.GLfloat)
+attribAlignment Attrib_ivec2 = alignment @(Array 2 GL.GLint)
+attribAlignment Attrib_ivec3 = alignment @(Array 3 GL.GLint)
+attribAlignment Attrib_ivec4 = alignment @(Array 4 GL.GLint)
+
+attribSize :: AttributeEnum -> Int
+attribSize Attrib_vec2 = size @(Array 2 GL.GLfloat)
+attribSize Attrib_vec3 = size @(Array 3 GL.GLfloat)
+attribSize Attrib_vec4 = size @(Array 4 GL.GLfloat)
+attribSize Attrib_ivec2 = size @(Array 2 GL.GLint)
+attribSize Attrib_ivec3 = size @(Array 3 GL.GLint)
+attribSize Attrib_ivec4 = size @(Array 4 GL.GLint)
+
+configureAttribute :: [AttributeEnum] -> Int -> IO ()
+configureAttribute layout index = do
+  let glIndex = fromIntegral index
+      stride = fromIntegral (attribsSize layout)
+      offset = Foreign.plusPtr Foreign.nullPtr (fromIntegral (attributeLoc layout index))
+      attribType = layout !! index
+  GL.glEnableVertexAttribArray glIndex
+  case attribType of
+    Attrib_vec2 -> GL.glVertexAttribPointer glIndex 2 GL.GL_FLOAT GL.GL_FALSE stride offset
+    Attrib_vec3 -> GL.glVertexAttribPointer glIndex 3 GL.GL_FLOAT GL.GL_FALSE stride offset
+    Attrib_vec4 -> GL.glVertexAttribPointer glIndex 4 GL.GL_FLOAT GL.GL_FALSE stride offset
+    Attrib_ivec2 -> GL.glVertexAttribIPointer glIndex 2 GL.GL_INT stride offset
+    Attrib_ivec3 -> GL.glVertexAttribIPointer glIndex 3 GL.GL_INT stride offset
+    Attrib_ivec4 -> GL.glVertexAttribIPointer glIndex 4 GL.GL_INT stride offset
+
+attribsSize :: [AttributeEnum] -> Int
+attribsSize xs = roundUp (foldr (\a acc -> roundUp acc (attribAlignment a) + (attribSize a)) 0 xs) (attribsAlignment xs)
+
+attribsAlignment :: [AttributeEnum] -> Int
+attribsAlignment [] = 1
+attribsAlignment xs = maximum (fmap attribAlignment xs)
+
+attributeLoc :: [AttributeEnum] -> Int -> Int
+attributeLoc xs n = case drop n xs of
+  (h:_) -> roundUp (attribsSize (take n xs)) (attribAlignment h)
+  [] -> error ("mistake in attribute lookup. index " ++ show n ++ " out of bounds")
+
+
+--- VERTEX TYPES ---------------------------------------------------------------
+
+class Vertex v where layout :: [AttributeEnum]
+
+instance (Data.Vector.Storable.Storable s, KnownNat n) => Data.Vector.Storable.Storable (Array n s) where
+  sizeOf _ = (1+fromIntegral (maxBound :: Finite n)) * size @s
+  alignment _ = alignment @s
+  peek p = do
+    let n = fromIntegral (maxBound :: Finite n)
+    xs <- Foreign.peekArray n (Foreign.castPtr p)
+    pure (Data.Vector.Storable.unsafeIndex (Data.Vector.Storable.fromListN n xs) . fromIntegral . getFinite)
+  poke p f = mapM_ (\i -> Foreign.pokeElemOff (Foreign.castPtr p) (fromIntegral i) (f i)) (finites @n)
+
+roundUp :: Int -> Int -> Int
+roundUp val base = (val + base - 1) `div` base * base
+
+
+--- TEXTURED SKELETON SHADER ---------------------------------------------------
+
+data TexturedSkeletonVertex = TexturedSkeletonVertex (Vec 3) (Vec 3) (Vec 2) (Array 4 GL.GLint) (Vec 4) deriving (Show)
+instance Vertex TexturedSkeletonVertex where layout = [Attrib_vec3, Attrib_vec3, Attrib_vec2, Attrib_ivec4, Attrib_vec4]
+instance Data.Vector.Storable.Storable TexturedSkeletonVertex where
+  sizeOf _ = attribsSize (layout @TexturedSkeletonVertex)
+  alignment _ = attribsAlignment (layout @TexturedSkeletonVertex)
+  peek p = TexturedSkeletonVertex
+   <$> Foreign.peekByteOff p (attributeLoc (layout @TexturedSkeletonVertex) 0)
+   <*> Foreign.peekByteOff p (attributeLoc (layout @TexturedSkeletonVertex) 1)
+   <*> Foreign.peekByteOff p (attributeLoc (layout @TexturedSkeletonVertex) 2)
+   <*> Foreign.peekByteOff p (attributeLoc (layout @TexturedSkeletonVertex) 3)
+   <*> Foreign.peekByteOff p (attributeLoc (layout @TexturedSkeletonVertex) 4)
+  poke p (TexturedSkeletonVertex a b c d e) = do
+       Foreign.pokeByteOff p (attributeLoc (layout @TexturedSkeletonVertex) 0) a
+       Foreign.pokeByteOff p (attributeLoc (layout @TexturedSkeletonVertex) 1) b
+       Foreign.pokeByteOff p (attributeLoc (layout @TexturedSkeletonVertex) 2) c
+       Foreign.pokeByteOff p (attributeLoc (layout @TexturedSkeletonVertex) 3) d
+       Foreign.pokeByteOff p (attributeLoc (layout @TexturedSkeletonVertex) 4) e
+
+texturedSkeletonVertexSrc = 
+  """#version 430\r\n
+  uniform mat4 modelToProjectionMatrix;
+  uniform mat4 modelToWorldTransformMatrix;
+  uniform mat4 bones[128];
+  in layout(location=0) vec4 vertexPositionModelSpace;
+  in layout(location=1) vec3 normalModelSpace;
+  in layout(location=2) vec2 vertex_uv;
+  in layout(location=3) ivec4 parentId;
+  in layout(location=4) vec4 weights;
+  out vec3 normalWorldSpace;
+  out vec2 fragment_uv;
+  out vec3 vertexPositionWorldSpace;
+  void main() {
+    vec4 posePosition = vec4(0);
+    if (parentId[0] != -1) posePosition += weights[0] * bones[parentId[0]] * vertexPositionModelSpace;
+    if (parentId[1] != -1) posePosition += weights[1] * bones[parentId[1]] * vertexPositionModelSpace;
+    if (parentId[2] != -1) posePosition += weights[2] * bones[parentId[2]] * vertexPositionModelSpace;
+    if (parentId[3] != -1) posePosition += weights[3] * bones[parentId[3]] * vertexPositionModelSpace;
+    gl_Position = modelToProjectionMatrix * posePosition;
+    normalWorldSpace = vec3(modelToWorldTransformMatrix * vec4(normalModelSpace,0));
+    vertexPositionWorldSpace = vec3(modelToWorldTransformMatrix * vertexPositionModelSpace);
+    fragment_uv = vertex_uv;
+  }
+  """
+
+texturedSkeletonFragmentSrc = 
+  """#version 430\r\n
+  uniform vec3 lightPosition;
+  uniform vec3 eyePosition;
+  uniform vec4 ambientLight;
+  uniform sampler2D base_texture;
+  in vec3 normalWorldSpace;
+  in vec3 vertexPositionWorldSpace;
+  in vec2 fragment_uv;
+  out vec4 fragmentColor;
+  void main() {
+    vec3 lightVectorWorldSpace = normalize(lightPosition - vertexPositionWorldSpace);
+    float brightness = dot(lightVectorWorldSpace, normalize(normalWorldSpace));
+    vec4 diffuseLight = vec4(brightness,brightness,brightness,1.0);
+    vec3 reflectedLightWorldSpace = reflect(-lightVectorWorldSpace,normalWorldSpace);
+    vec3 eyeVectorWorldSpace = normalize(eyePosition - vertexPositionWorldSpace);
+    float s = pow(clamp(dot(reflectedLightWorldSpace, eyeVectorWorldSpace),0,1),2048);
+    vec4 specularLight = vec4(s,s,s,1.0);
+    vec4 lighting = clamp(diffuseLight,0.0,1.0) + ambientLight + clamp(specularLight,0,1);
+    fragmentColor = lighting * texture(base_texture,fragment_uv);
+  }
+  """
+
+--- COLORED NORMAL SHADER ------------------------------------------------------
 
 data ColoredNormalVertex = ColoredNormalVertex (Vec 3) (Vec 3) (Vec 3) deriving (Show)
-instance Vertex ColoredNormalVertex where layout = [(3,GL.GL_FLOAT),(3,GL.GL_FLOAT),(3,GL.GL_FLOAT)]
+instance Vertex ColoredNormalVertex where layout = [Attrib_vec3, Attrib_vec3, Attrib_vec3]
 instance Data.Vector.Storable.Storable ColoredNormalVertex where
-  sizeOf _ = roundUp (sum [size @(Vec 3), size @(Vec 3), size @(Vec 3)]) (alignment @ColoredNormalVertex)
-  alignment _ = maximum [alignment @(Vec 3), alignment @(Vec 3), alignment @(Vec 3)]
-  peek p =
-    ColoredNormalVertex
-       <$> Foreign.peekByteOff p (0 * size @GL.GLfloat)
-       <*> Foreign.peekByteOff p (3 * size @GL.GLfloat)
-       <*> Foreign.peekByteOff p (6 * size @GL.GLfloat)
+  sizeOf _ = attribsSize (layout @ColoredNormalVertex)
+  alignment _ = attribsAlignment (layout @ColoredNormalVertex)
+  peek p = ColoredNormalVertex
+   <$> Foreign.peekByteOff p (attributeLoc (layout @ColoredNormalVertex) 0)
+   <*> Foreign.peekByteOff p (attributeLoc (layout @ColoredNormalVertex) 1)
+   <*> Foreign.peekByteOff p (attributeLoc (layout @ColoredNormalVertex) 2)
   poke p (ColoredNormalVertex a b c) = do
-      Foreign.pokeByteOff p (0 * size @GL.GLfloat) a
-      Foreign.pokeByteOff p (3 * size @GL.GLfloat) b
-      Foreign.pokeByteOff p (6 * size @GL.GLfloat) c
+       Foreign.pokeByteOff p (attributeLoc (layout @ColoredNormalVertex) 0) a
+       Foreign.pokeByteOff p (attributeLoc (layout @ColoredNormalVertex) 1) b
+       Foreign.pokeByteOff p (attributeLoc (layout @ColoredNormalVertex) 2) c
 
+coloredNormalVertexSrc =
+  """#version 430\r\n
+  uniform mat4 modelToProjectionMatrix;
+  uniform mat4 modelToWorldTransformMatrix;
+  in layout(location=0) vec4 vertexPositionModelSpace;
+  in layout(location=1) vec3 vertexColor;
+  in layout(location=2) vec3 normalModelSpace;
+  out vec3 normalWorldSpace;
+  out vec3 color;
+  out vec3 vertexPositionWorldSpace;
+  void main() {
+    gl_Position = modelToProjectionMatrix * vertexPositionModelSpace;
+    color = vertexColor;
+    normalWorldSpace = vec3(modelToWorldTransformMatrix * vec4(normalModelSpace,0));
+    vertexPositionWorldSpace = vec3(modelToWorldTransformMatrix * vertexPositionModelSpace);
+  }
+  """
 
-data PositionVertex = PositionVertex (Vec 4) deriving (Show)
-instance Vertex PositionVertex where layout = [(4,GL.GL_FLOAT)]
+coloredNormalFragmentSrc =
+  """#version 430\r\n
+  uniform vec3 lightPosition;
+  uniform vec3 eyePosition;
+  uniform vec4 ambientLight;
+  in vec3 normalWorldSpace;
+  in vec3 vertexPositionWorldSpace;
+  in vec3 color;
+  out vec4 fragmentColor;
+  void main() {
+    vec3 lightVectorWorldSpace = normalize(lightPosition - vertexPositionWorldSpace);
+    float brightness = dot(lightVectorWorldSpace, normalize(normalWorldSpace));
+    vec4 diffuseLight = vec4(brightness,brightness,brightness,1.0);
+    vec3 reflectedLightWorldSpace = reflect(-lightVectorWorldSpace,normalWorldSpace);
+    vec3 eyeVectorWorldSpace = normalize(eyePosition - vertexPositionWorldSpace);
+    float s = pow(clamp(dot(reflectedLightWorldSpace, eyeVectorWorldSpace),0,1),64);
+    vec4 specularLight = vec4(s,s,s,1.0);
+    vec4 lighting = clamp(diffuseLight,0.0,1.0) + ambientLight + clamp(specularLight,0,1);
+    fragmentColor = lighting * vec4(color,1);
+  }
+  """
+
+--- BASIC POSITION SHADER ------------------------------------------------------
+
+newtype PositionVertex = PositionVertex (Vec 4) deriving (Show)
+instance Vertex PositionVertex where layout = [Attrib_vec4]
 instance Data.Vector.Storable.Storable PositionVertex where
-  sizeOf _ = roundUp (sum [size @(Vec 4)]) (alignment @PositionVertex)
-  alignment _ = maximum [alignment @(Vec 4)]
-  peek p =
-    PositionVertex
-       <$> Foreign.peekByteOff p (0 * size @GL.GLfloat)
+  sizeOf _ = attribsSize (layout @PositionVertex)
+  alignment _ = attribsAlignment (layout @PositionVertex)
+  peek p = PositionVertex
+   <$> Foreign.peekByteOff p (attributeLoc (layout @PositionVertex) 0)
   poke p (PositionVertex a) = do
-      Foreign.pokeByteOff p (0 * size @GL.GLfloat) a
+       Foreign.pokeByteOff p (attributeLoc (layout @PositionVertex) 0) a
 
--- not sure i can do this exactly. wonder if we could do a type level equivalent?
--- instance Vertex v => Data.Vector.Storable.Storable v where
---   sizeOf _ = _ (layout @v)
---   alignment _ = _ (layout @v)
+positionVertexSrc =
+  """#version 430\r\n
+  uniform mat4 modelToProjectionMatrix;
+  in layout(location=0) vec4 vertexPositionModelSpace;
+  void main() {
+    gl_Position = modelToProjectionMatrix * vertexPositionModelSpace;
+  }
+  """
 
--- i think in general what i want is a way to write something like
---
--- type Quux = [Vec 3, Int, Vec 3]
---
--- and then have all the layout automatically generated. vertex attribution, buffer uploads, allat
---
--- type like VertexData? or smth?
---
--- also should seperate this from particular file formats. vertex data should just be some basic thing
-
--- type Quux = '[Vec 3, Int, Vec 3]
-
--- data HList :: [*] -> * where
---   HNil  :: HList '[]
---   (:>)  :: x -> HList xs -> HList (x ': xs)
+positionFragmentSrc =
+  """#version 430\r\n
+  out vec4 fragmentColor;
+  void main() {
+    fragmentColor = vec4(1,1,1,1);
+  }
+  """
 
 
-
-
-setShaderUniform :: SetUniform u => GL.GLuint -> String -> u -> IO ()
-setShaderUniform programID uniformName value = do
-  uniformLoc <- Foreign.C.String.withCString uniformName (GL.glGetUniformLocation programID)
-  setUniform uniformLoc value
-
-configureAttributes :: forall v.(Data.Vector.Storable.Storable v, Vertex v) => IO ()
-configureAttributes =
-  let stride = fromIntegral (size @v)
-      go index offset [] = pure ()
-      go index offset ((attributeDimension,scalarType):xs) = do
-        GL.glEnableVertexAttribArray index
-        case scalarType of
-            GL.GL_FLOAT -> GL.glVertexAttribPointer index attributeDimension scalarType GL.GL_FALSE stride offset
-            GL.GL_INT -> GL.glVertexAttribIPointer index attributeDimension scalarType stride offset
-            _ -> error "BUFFER ERROR: we don't support that type yet"
-        go (index + 1) (Foreign.plusPtr offset (fromIntegral (enumSize scalarType * attributeDimension))) xs
-  in go 0 Foreign.nullPtr (layout @v)
-
+--- GENERATE BUFFERS -----------------------------------------------------------
 
 class Index i where
   flatten :: i -> [GL.GLushort]
@@ -592,7 +685,9 @@ instance Integral i => Index (i,i) where
   flatten (a,b) = fromIntegral <$> [a,b]
   indexDim = 2
 
-genBuffer :: forall v i.(Data.Vector.Storable.Storable v, Vertex v, Index i) => [i] -> [v] -> IO ObjMetadata
+data BufferMetadata = BufferMetadata { vertexArrayID :: GL.GLuint, indexCount :: GL.GLsizei } deriving Show
+
+genBuffer :: forall v i.(Data.Vector.Storable.Storable v, Vertex v, Index i) => [i] -> [v] -> IO BufferMetadata
 genBuffer indices verts = do
   vertexArrayObjectID <- Foreign.alloca $ \idPtr -> do
       GL.glGenVertexArrays 1 idPtr
@@ -611,8 +706,8 @@ genBuffer indices verts = do
       GL.glBindBuffer GL.GL_ARRAY_BUFFER vertexBufferID
       let vertexBufferSize = fromIntegral (size @v * length verts)
       Foreign.withArray verts (flip (GL.glBufferData GL.GL_ARRAY_BUFFER vertexBufferSize) GL.GL_STATIC_DRAW)
-  configureAttributes @v
-  pure (ObjMetadata { vertexArrayID = vertexArrayObjectID , indexCount = fromIntegral (indexDim @i * length indices) })
+  traverse (configureAttribute (layout @v)) [0..length (layout @v)-1]
+  pure (BufferMetadata { vertexArrayID = vertexArrayObjectID , indexCount = fromIntegral (indexDim @i * length indices) })
 
 
 
@@ -662,12 +757,10 @@ handleEvent event appState = case SDL.eventPayload event of
     let SDL.V2 x y = SDL.mouseMotionEventRelMotion mme
         limit = 89
         pitchUpdateProposal = - fromIntegral y / 3
-        pitchUpdate =
-          if cameraPitch appState + pitchUpdateProposal > limit
-          then min 0 pitchUpdateProposal
-          else if cameraPitch appState - pitchUpdateProposal < -limit
-          then max 0 pitchUpdateProposal
-          else pitchUpdateProposal
+        pitchUpdate
+          | cameraPitch appState + pitchUpdateProposal > limit = min 0 pitchUpdateProposal
+          | cameraPitch appState - pitchUpdateProposal < -limit = max 0 pitchUpdateProposal
+          | otherwise = pitchUpdateProposal
         yawUpdate = - fromIntegral x / 3
     in appState
         { viewDirection = memo
@@ -681,17 +774,17 @@ handleEvent event appState = case SDL.eventPayload event of
 
 moveCamera direction appState = appState { cameraPosition = memo (\k ->
   case strengthen k of
-    Just k -> (cameraPosition appState . weaken) k + moveSpeed * (normalize (direction . weaken)) k
+    Just k -> (cameraPosition appState . weaken) k + moveSpeed * normalize (direction . weaken) k
     Nothing -> 1)}
 
 moveForward appState =
    moveCamera (\k -> if k == y then 0 else viewDirection appState k) appState
 moveLeft appState =
-   moveCamera (\k -> - maybe 0 (cross (viewDirection appState . weaken) (v3 0 1 0)) (strengthen k)) appState
+   moveCamera (negate . maybe 0 (cross (viewDirection appState . weaken) (v3 0 1 0)) . strengthen) appState
 moveBackward appState =
    moveCamera (\k -> if k == y then 0 else - viewDirection appState k) appState
 moveRight appState =
-   moveCamera (\k -> maybe 0 (cross (viewDirection appState . weaken) (v3 0 1 0)) (strengthen k)) appState  
+   moveCamera (maybe 0 (cross (viewDirection appState . weaken) (v3 0 1 0)) . strengthen) appState  
 moveUp =
    moveCamera (v4 0 1 0 1) -- alt for vector literals: ijkl -> v4 0 1 0 1 = j + l
 moveDown =
@@ -765,139 +858,26 @@ main = do
                 error errorMessage
         pure programID
 
+  basicShader <- initShader coloredNormalVertexSrc coloredNormalFragmentSrc
+  textureShader <- initShader texturedSkeletonVertexSrc texturedSkeletonFragmentSrc
+  skellyShader <- initShader positionVertexSrc positionFragmentSrc
 
-  basicShader <- initShader
-        """#version 430\r\n
-        uniform mat4 modelToProjectionMatrix;
-        uniform mat4 modelToWorldTransformMatrix;
-        in layout(location=0) vec4 vertexPositionModelSpace;
-        in layout(location=1) vec3 vertexColor;
-        in layout(location=2) vec3 normalModelSpace;
-        out vec3 normalWorldSpace;
-        out vec3 color;
-        out vec3 vertexPositionWorldSpace;
-        void main() {
-          gl_Position = modelToProjectionMatrix * vertexPositionModelSpace;
-          color = vertexColor;
-          normalWorldSpace = vec3(modelToWorldTransformMatrix * vec4(normalModelSpace,0));
-          vertexPositionWorldSpace = vec3(modelToWorldTransformMatrix * vertexPositionModelSpace);
-        }
-        """
 
-        """#version 430\r\n
-        uniform vec3 lightPosition;
-        uniform vec3 eyePosition;
-        uniform vec4 ambientLight;
-        in vec3 normalWorldSpace;
-        in vec3 vertexPositionWorldSpace;
-        in vec3 color;
-        out vec4 fragmentColor;
-        void main() {
-          vec3 lightVectorWorldSpace = normalize(lightPosition - vertexPositionWorldSpace);
-          float brightness = dot(lightVectorWorldSpace, normalize(normalWorldSpace));
-          vec4 diffuseLight = vec4(brightness,brightness,brightness,1.0);
-          vec3 reflectedLightWorldSpace = reflect(-lightVectorWorldSpace,normalWorldSpace);
-          vec3 eyeVectorWorldSpace = normalize(eyePosition - vertexPositionWorldSpace);
-          float s = pow(clamp(dot(reflectedLightWorldSpace, eyeVectorWorldSpace),0,1),64);
-          vec4 specularLight = vec4(s,s,s,1.0);
-          vec4 lighting = clamp(diffuseLight,0.0,1.0) + ambientLight + clamp(specularLight,0,1);
-          fragmentColor = lighting * vec4(color,1);
-        }
-        """
+  --- LOAD OBJECTS -------------------------------------------------------------
 
-  teapotObj <- do
-    let filename = "resources/teapot.obj"
-    src <- readFile filename
-    case MP.parse pObj filename src of
-      Left err -> error (show err)
-      Right teapot -> pure teapot
 
-  let initializeObject obj = genBuffer (faces obj) (fmap (\(v,n) -> ColoredNormalVertex (position v) (color v) n) (zipWith (,) (vertices obj) (normals obj)))
+  let initializeObject obj = genBuffer (faces obj) (zipWith (\v n -> ColoredNormalVertex (position v) (color v) n) (vertices obj) (normals obj))
   
   cubeMetadata <- initializeObject cubeObj
   pyramidMetadata <- initializeObject pyramidObj
   planeMetadata <- initializeObject planeObj
-  teapotMetadata <- initializeObject teapotObj
 
-  textureShader <- initShader 
-        """#version 430\r\n
-        uniform mat4 modelToProjectionMatrix;
-        uniform mat4 modelToWorldTransformMatrix;
-        uniform mat4 bones[128];
-        in layout(location=0) vec4 vertexPositionModelSpace;
-        in layout(location=1) vec3 normalModelSpace;
-        in layout(location=2) vec2 vertex_uv;
-        in layout(location=3) ivec4 parentId;
-        in layout(location=4) vec4 weights;
-        out vec3 normalWorldSpace;
-        out vec2 fragment_uv;
-        out vec3 vertexPositionWorldSpace;
-        out vec3 color;
-
-        vec3 hsv2rgb(vec3 c) {
-            vec3 K = vec3(1.0, 2.0/3.0, 1.0/3.0);
-            vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - 3.0);
-            return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
-        }
-
-        vec3 intToColor(int n) {
-            float hue = float(n) / float(60);
-            return hsv2rgb(vec3(hue, 0.8, 0.9));
-        }
-        
-
-        void main() {
-          //vec4 posePosition =
-          //    weights[0] * bones[parentId[0]] * vertexPositionModelSpace
-          //  + weights[1] * bones[parentId[1]] * vertexPositionModelSpace
-          //  + weights[2] * bones[parentId[2]] * vertexPositionModelSpace
-          //  + weights[3] * bones[parentId[3]] * vertexPositionModelSpace;
-          vec4 posePosition = vec4(0);
-          if (parentId[0] != -1) {
-              posePosition += weights[0] * bones[parentId[0]] * vertexPositionModelSpace;
-          }
-          if (parentId[1] != -1) {
-              posePosition += weights[1] * bones[parentId[1]] * vertexPositionModelSpace;
-          }
-          if (parentId[2] != -1) {
-              posePosition += weights[2] * bones[parentId[2]] * vertexPositionModelSpace;
-          }
-          if (parentId[3] != -1) {
-              posePosition += weights[3] * bones[parentId[3]] * vertexPositionModelSpace;
-          }
-          gl_Position = modelToProjectionMatrix * posePosition;
-          normalWorldSpace = vec3(modelToWorldTransformMatrix * vec4(normalModelSpace,0));
-          vertexPositionWorldSpace = vec3(modelToWorldTransformMatrix * vertexPositionModelSpace);
-          fragment_uv = vertex_uv;
-          //color = weights.xyz;
-          color = intToColor(parentId[0]);
-        }
-        """
-
-        """#version 430\r\n
-        uniform vec3 lightPosition;
-        uniform vec3 eyePosition;
-        uniform vec4 ambientLight;
-        uniform sampler2D base_texture;
-        in vec3 normalWorldSpace;
-        in vec3 vertexPositionWorldSpace;
-        in vec2 fragment_uv;
-        in vec3 color;
-        out vec4 fragmentColor;
-        void main() {
-          vec3 lightVectorWorldSpace = normalize(lightPosition - vertexPositionWorldSpace);
-          float brightness = dot(lightVectorWorldSpace, normalize(normalWorldSpace));
-          vec4 diffuseLight = vec4(brightness,brightness,brightness,1.0);
-          vec3 reflectedLightWorldSpace = reflect(-lightVectorWorldSpace,normalWorldSpace);
-          vec3 eyeVectorWorldSpace = normalize(eyePosition - vertexPositionWorldSpace);
-          float s = pow(clamp(dot(reflectedLightWorldSpace, eyeVectorWorldSpace),0,1),2048);
-          vec4 specularLight = vec4(s,s,s,1.0);
-          vec4 lighting = clamp(diffuseLight,0.0,1.0) + ambientLight + clamp(specularLight,0,1);
-          fragmentColor = lighting * texture(base_texture,fragment_uv);
-          //fragmentColor = vec4(color,1);
-        }
-        """
-
+  teapotMetadata <- do
+    let filename = "resources/teapot.obj"
+    src <- readFile filename
+    case MP.parse pObj filename src of
+      Left err -> error (show err)
+      Right teapot -> initializeObject teapot
 
   zigzagoon <- do
     let filename = "resources/Zigzagoon/Zigzagoon.SMD"
@@ -913,16 +893,12 @@ main = do
       Left err -> error (show err)
       Right model -> pure (smdscale 0.03 model)
 
-
-  -- we should figure out how to deform the skeleton first! then apply the basic principles from that simple situation to the model itself
-
   let readTex matName = do
           tex <- Codec.Picture.readImage ("resources/Zigzagoon/images/" ++ matName)
           case tex of
             Left err -> error err
             Right pic -> do
               let img = Codec.Picture.convertRGBA8 pic
-
               textureID <- Foreign.alloca $ \textureIDPtr -> do
                   GL.glGenTextures 1 textureIDPtr
                   Foreign.peek textureIDPtr
@@ -943,16 +919,12 @@ main = do
                     GL.GL_RGBA
                     GL.GL_UNSIGNED_BYTE
                     . Foreign.castPtr)
-
               GL.glPixelStorei GL.GL_UNPACK_ALIGNMENT 1
-
               GL.glTexParameteri GL.GL_TEXTURE_2D GL.GL_TEXTURE_MIN_FILTER (fromIntegral GL.GL_LINEAR_MIPMAP_LINEAR)
               GL.glTexParameteri GL.GL_TEXTURE_2D GL.GL_TEXTURE_MAG_FILTER (fromIntegral GL.GL_LINEAR)
               GL.glTexParameteri GL.GL_TEXTURE_2D GL.GL_TEXTURE_WRAP_S (fromIntegral GL.GL_REPEAT)
               GL.glTexParameteri GL.GL_TEXTURE_2D GL.GL_TEXTURE_WRAP_T (fromIntegral GL.GL_REPEAT)
-
               GL.glGenerateMipmap GL.GL_TEXTURE_2D
-
               let smd = zigzagoon {triangles = filter (\v -> material v == matName) (triangles zigzagoon)}
               let smdTris = fmap (\n -> (3*n,3*n+1,3*n+2)) [0..length (triangles smd) - 1]
               let smdVerts = concatMap (\v -> let (a,b,c) = verts v in [a,b,c]) (triangles smd)
@@ -960,22 +932,6 @@ main = do
               pure (textureID,md)
 
   matMap <- sequenceA (Data.Map.Internal.fromSet readTex (Data.Set.fromList (material <$> triangles zigzagoon)))
-
-  skellyShader <- initShader
-        """#version 430\r\n
-        uniform mat4 modelToProjectionMatrix;
-        in layout(location=0) vec4 vertexPositionModelSpace;
-        void main() {
-          gl_Position = modelToProjectionMatrix * vertexPositionModelSpace;
-        }
-        """
-
-        """#version 430\r\n
-        out vec4 fragmentColor;
-        void main() {
-          fragmentColor = vec4(1,1,1,1);
-        }
-        """
 
   skelly <- let pose = head $ tail (smdPoses ziganim) in genBuffer (roseEdges pose) (fmap (PositionVertex . snd) (flattenRose pose))
 
@@ -1028,12 +984,11 @@ main = do
         drawTriangulation basicShader cubeMetadata (translate (v3 (-1) 0 (-4)) . rotation 45 (v3 1 1 1))
         drawTriangulation basicShader pyramidMetadata (translate (v3 0 0 (-2)))
         drawTriangulation basicShader planeMetadata (translate (v3 0 (-2) (-4)))
-        drawTriangulation basicShader teapotMetadata (translate (v3 (3) 1 (-8)))
+        drawTriangulation basicShader teapotMetadata (translate (v3 3 1 (-8)))
 
-        let zigTransform = (translate (v3 (-2) (-2) (-1)) . rotation 45 (v3 0 1 0) . rotation 90 (v3 (-1) 0 0))        
+        let zigTransform = translate (v3 (-2) (-2) (-1)) . rotation 45 (v3 0 1 0) . rotation 90 (v3 (-1) 0 0)
 
         GL.glUseProgram textureShader
-
 
         let zigpose = transformToMat <$> pose zigzagoon (head (skeleton zigzagoon)) (head animState)
         bonesloc <- Foreign.C.String.withCString "bones" (GL.glGetUniformLocation textureShader)
@@ -1041,11 +996,12 @@ main = do
         setShaderUniform textureShader "ambientLight" (v4 0.3 0.3 0.3 1)
         setShaderUniform textureShader "lightPosition" lightPosition
         setShaderUniform textureShader "eyePosition" (cameraPosition appState . weaken)
-        mapM
+        mapM_
            (\(textureID,zigMetadata) -> do
                 GL.glActiveTexture GL.GL_TEXTURE0
                 GL.glBindTexture GL.GL_TEXTURE_2D textureID
-                Foreign.C.String.withCString "texture" (GL.glGetUniformLocation textureShader) >>= flip GL.glUniform1i 0
+                Foreign.C.String.withCString "texture" (GL.glGetUniformLocation textureShader)
+                     >>= flip GL.glUniform1i 0
                 drawTriangulation textureShader zigMetadata zigTransform)
            matMap
 
@@ -1054,7 +1010,6 @@ main = do
         GL.glBindVertexArray (vertexArrayID skelly)
         setShaderUniform skellyShader "modelToProjectionMatrix" (toScreenspace zigTransform)
         -- GL.glDrawElements GL.GL_LINES (indexCount skelly) GL.GL_UNSIGNED_SHORT Foreign.nullPtr
-        
 
         unless (timeToQuit appState) (loop appState (tail animState))
 
