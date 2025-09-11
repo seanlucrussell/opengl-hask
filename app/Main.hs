@@ -426,17 +426,16 @@ setShaderUniform programID uniformName value = do
 
 smdToTexturedSkeletonVertex :: SMD_Vertex -> TexturedSkeletonVertex
 smdToTexturedSkeletonVertex v =
-   TexturedSkeletonVertex
-     (vPos v)
-     (vNormal v)
-     (vUV v)
-     (case vWeights v of
+     vPos v
+  :& vNormal v
+  :& vUV v
+  :& (case vWeights v of
         [(x,_),(y,_),(z,_),(w,_)] -> fromIntegral <$> a4 x y z w
         [(x,_),(y,_),(z,_)] -> fromIntegral <$> a4 x y z (-1)
         [(x,_),(y,_)] -> fromIntegral <$> a4 x y (-1) (-1)
         [(x,_)] -> fromIntegral <$> a4 x (-1) (-1) (-1)
         _ -> fromIntegral <$> a4 (-1) (-1) (-1) (-1))
-     (case vWeights v of
+  :& (case vWeights v of
         [(_,x),(_,y),(_,z),(_,w)] -> v4 x y z w
         [(_,x),(_,y),(_,z)] -> v4 x y z (-1)
         [(_,x),(_,y)] -> v4 x y (-1) (-1)
@@ -446,64 +445,14 @@ smdToTexturedSkeletonVertex v =
 
 --- ATTRIBUTE TYPES ------------------------------------------------------------
 
-data AttributeEnum
-   = Attrib_vec2
-   | Attrib_vec3
-   | Attrib_vec4
-   | Attrib_ivec2
-   | Attrib_ivec3
-   | Attrib_ivec4
-   deriving Show
+data a :& b = a :& b deriving (Show)
+instance (Foreign.Storable a, Foreign.Storable b) => Foreign.Storable (a :& b) where
+  sizeOf _ = roundUp (size @a) (alignment @b) + size @b
+  alignment _ = max (alignment @a) (alignment @b)
+  peek p = (:&) <$> Foreign.peekByteOff p 0  <*> Foreign.peekByteOff p (roundUp (size @a) (alignment @b))
+  poke p (a :& b) = Foreign.pokeByteOff p 0 a >> Foreign.pokeByteOff p (roundUp (size @a) (alignment @b)) b
 
-attribAlignment :: AttributeEnum -> Int
-attribAlignment Attrib_vec2 = alignment @(Array 2 GL.GLfloat)
-attribAlignment Attrib_vec3 = alignment @(Array 3 GL.GLfloat)
-attribAlignment Attrib_vec4 = alignment @(Array 4 GL.GLfloat)
-attribAlignment Attrib_ivec2 = alignment @(Array 2 GL.GLint)
-attribAlignment Attrib_ivec3 = alignment @(Array 3 GL.GLint)
-attribAlignment Attrib_ivec4 = alignment @(Array 4 GL.GLint)
-
-attribSize :: AttributeEnum -> Int
-attribSize Attrib_vec2 = size @(Array 2 GL.GLfloat)
-attribSize Attrib_vec3 = size @(Array 3 GL.GLfloat)
-attribSize Attrib_vec4 = size @(Array 4 GL.GLfloat)
-attribSize Attrib_ivec2 = size @(Array 2 GL.GLint)
-attribSize Attrib_ivec3 = size @(Array 3 GL.GLint)
-attribSize Attrib_ivec4 = size @(Array 4 GL.GLint)
-
-configureAttribute :: [AttributeEnum] -> Int -> IO ()
-configureAttribute layout index = do
-  let glIndex = fromIntegral index
-      stride = fromIntegral (attribsSize layout)
-      offset = Foreign.plusPtr Foreign.nullPtr (fromIntegral (attributeLoc layout index))
-      attribType = layout !! index
-  GL.glEnableVertexAttribArray glIndex
-  case attribType of
-    Attrib_vec2 -> GL.glVertexAttribPointer glIndex 2 GL.GL_FLOAT GL.GL_FALSE stride offset
-    Attrib_vec3 -> GL.glVertexAttribPointer glIndex 3 GL.GL_FLOAT GL.GL_FALSE stride offset
-    Attrib_vec4 -> GL.glVertexAttribPointer glIndex 4 GL.GL_FLOAT GL.GL_FALSE stride offset
-    Attrib_ivec2 -> GL.glVertexAttribIPointer glIndex 2 GL.GL_INT stride offset
-    Attrib_ivec3 -> GL.glVertexAttribIPointer glIndex 3 GL.GL_INT stride offset
-    Attrib_ivec4 -> GL.glVertexAttribIPointer glIndex 4 GL.GL_INT stride offset
-
-attribsSize :: [AttributeEnum] -> Int
-attribsSize xs = roundUp (foldr (\a acc -> roundUp acc (attribAlignment a) + (attribSize a)) 0 xs) (attribsAlignment xs)
-
-attribsAlignment :: [AttributeEnum] -> Int
-attribsAlignment [] = 1
-attribsAlignment xs = maximum (fmap attribAlignment xs)
-
-attributeLoc :: [AttributeEnum] -> Int -> Int
-attributeLoc xs n = case drop n xs of
-  (h:_) -> roundUp (attribsSize (take n xs)) (attribAlignment h)
-  [] -> error ("mistake in attribute lookup. index " ++ show n ++ " out of bounds")
-
-
---- VERTEX TYPES ---------------------------------------------------------------
-
-class Vertex v where layout :: [AttributeEnum]
-
-instance (Data.Vector.Storable.Storable s, KnownNat n) => Data.Vector.Storable.Storable (Array n s) where
+instance (Foreign.Storable s, KnownNat n) => Foreign.Storable (Array n s) where
   sizeOf _ = (1+fromIntegral (maxBound :: Finite n)) * size @s
   alignment _ = alignment @s
   peek p = do
@@ -516,26 +465,75 @@ roundUp :: Int -> Int -> Int
 roundUp val base = (val + base - 1) `div` base * base
 
 
+class Attribute a where configureAttribute :: GL.GLsizei -> GL.GLuint -> Foreign.Ptr p -> IO ()
+instance Attribute (Vec 2) where configureAttribute stride index = GL.glVertexAttribPointer index 2 GL.GL_FLOAT GL.GL_FALSE stride
+instance Attribute (Vec 3) where configureAttribute stride index = GL.glVertexAttribPointer index 3 GL.GL_FLOAT GL.GL_FALSE stride
+instance Attribute (Vec 4) where configureAttribute stride index = GL.glVertexAttribPointer index 4 GL.GL_FLOAT GL.GL_FALSE stride
+instance Attribute (Array 2 GL.GLint) where configureAttribute stride index = GL.glVertexAttribIPointer index 2 GL.GL_INT stride
+instance Attribute (Array 3 GL.GLint) where configureAttribute stride index = GL.glVertexAttribIPointer index 3 GL.GL_INT stride
+instance Attribute (Array 4 GL.GLint) where configureAttribute stride index = GL.glVertexAttribIPointer index 4 GL.GL_INT stride
+
+
+-- ig we assume that the input pointer starts aligned. only need to fix alignment during concatenation
+class Vertex v where attrconf :: GL.GLsizei -> GL.GLuint -> Foreign.Ptr a -> (GL.GLuint -> Foreign.Ptr a -> IO ()) -> IO ()
+
+instance {-# OVERLAPPABLE #-} (Attribute a, Foreign.Storable a) => Vertex a where
+  attrconf stride index offset cont = do
+    GL.glEnableVertexAttribArray index
+    configureAttribute @a stride index offset
+    cont (index+1) (Foreign.plusPtr offset (size @a))
+
+instance {-# OVERLAPPING #-} (Foreign.Storable b, Vertex a, Vertex b) => Vertex (a :& b) where
+  attrconf stride index0 offset0 cont =
+     attrconf @a stride index0 offset0
+       (\index1 offset1 -> attrconf @b stride index1 (Foreign.alignPtr offset1 (alignment @b)) cont)
+
+runattrconf :: forall v.(Foreign.Storable v, Vertex v) => IO ()
+runattrconf = attrconf @v (fromIntegral (size @v)) 0 Foreign.nullPtr (\_ _ -> pure ())
+
+
+--- GENERATE BUFFERS -----------------------------------------------------------
+
+class Index i where
+  flatten :: i -> [GL.GLushort]
+  indexDim :: Int
+
+instance Integral i => Index (i,i,i) where
+  flatten (a,b,c) = fromIntegral <$> [a,b,c]
+  indexDim = 3
+
+instance Integral i => Index (i,i) where
+  flatten (a,b) = fromIntegral <$> [a,b]
+  indexDim = 2
+
+data BufferMetadata = BufferMetadata { vertexArrayID :: GL.GLuint, indexCount :: GL.GLsizei } deriving Show
+
+genBuffer :: forall v i.(Foreign.Storable v, Vertex v, Index i) => [i] -> [v] -> IO BufferMetadata
+genBuffer indices verts = do
+  vertexArrayObjectID <- Foreign.alloca $ \idPtr -> do
+      GL.glGenVertexArrays 1 idPtr
+      Foreign.peek idPtr
+  GL.glBindVertexArray vertexArrayObjectID
+  Foreign.alloca $ \indexBufferIDPtr -> do
+      GL.glGenBuffers 1 indexBufferIDPtr
+      indexBufferID <- Foreign.peek indexBufferIDPtr
+      GL.glBindBuffer GL.GL_ELEMENT_ARRAY_BUFFER indexBufferID
+      let indexBufferContent :: [GL.GLushort] = concatMap flatten indices
+      let indexBufferSize = fromIntegral (size @GL.GLushort * length indexBufferContent)
+      Foreign.withArray indexBufferContent (flip (GL.glBufferData GL.GL_ELEMENT_ARRAY_BUFFER indexBufferSize) GL.GL_STATIC_DRAW)
+  Foreign.alloca $ \vertexBufferIDPtr -> do
+      GL.glGenBuffers 1 vertexBufferIDPtr
+      vertexBufferID <- Foreign.peek vertexBufferIDPtr
+      GL.glBindBuffer GL.GL_ARRAY_BUFFER vertexBufferID
+      let vertexBufferSize = fromIntegral (size @v * length verts)
+      Foreign.withArray verts (flip (GL.glBufferData GL.GL_ARRAY_BUFFER vertexBufferSize) GL.GL_STATIC_DRAW)
+  runattrconf @v
+  -- configureAttributes @v
+  pure (BufferMetadata { vertexArrayID = vertexArrayObjectID , indexCount = fromIntegral (indexDim @i * length indices) })
+
 --- TEXTURED SKELETON SHADER ---------------------------------------------------
 
-data TexturedSkeletonVertex = TexturedSkeletonVertex (Vec 3) (Vec 3) (Vec 2) (Array 4 GL.GLint) (Vec 4) deriving (Show)
-instance Vertex TexturedSkeletonVertex where layout = [Attrib_vec3, Attrib_vec3, Attrib_vec2, Attrib_ivec4, Attrib_vec4]
-instance Data.Vector.Storable.Storable TexturedSkeletonVertex where
-  sizeOf _ = attribsSize (layout @TexturedSkeletonVertex)
-  alignment _ = attribsAlignment (layout @TexturedSkeletonVertex)
-  peek p = TexturedSkeletonVertex
-   <$> Foreign.peekByteOff p (attributeLoc (layout @TexturedSkeletonVertex) 0)
-   <*> Foreign.peekByteOff p (attributeLoc (layout @TexturedSkeletonVertex) 1)
-   <*> Foreign.peekByteOff p (attributeLoc (layout @TexturedSkeletonVertex) 2)
-   <*> Foreign.peekByteOff p (attributeLoc (layout @TexturedSkeletonVertex) 3)
-   <*> Foreign.peekByteOff p (attributeLoc (layout @TexturedSkeletonVertex) 4)
-  poke p (TexturedSkeletonVertex a b c d e) = do
-       Foreign.pokeByteOff p (attributeLoc (layout @TexturedSkeletonVertex) 0) a
-       Foreign.pokeByteOff p (attributeLoc (layout @TexturedSkeletonVertex) 1) b
-       Foreign.pokeByteOff p (attributeLoc (layout @TexturedSkeletonVertex) 2) c
-       Foreign.pokeByteOff p (attributeLoc (layout @TexturedSkeletonVertex) 3) d
-       Foreign.pokeByteOff p (attributeLoc (layout @TexturedSkeletonVertex) 4) e
-
+type TexturedSkeletonVertex = Vec 3 :& Vec 3 :& Vec 2 :& Array 4 GL.GLint :& Vec 4
 
 texturedSkeletonVertexSrc = 
   """#version 430\r\n
@@ -588,19 +586,7 @@ texturedSkeletonFragmentSrc =
 
 --- COLORED NORMAL SHADER ------------------------------------------------------
 
-data ColoredNormalVertex = ColoredNormalVertex (Vec 3) (Vec 3) (Vec 3) deriving (Show)
-instance Vertex ColoredNormalVertex where layout = [Attrib_vec3, Attrib_vec3, Attrib_vec3]
-instance Data.Vector.Storable.Storable ColoredNormalVertex where
-  sizeOf _ = attribsSize (layout @ColoredNormalVertex)
-  alignment _ = attribsAlignment (layout @ColoredNormalVertex)
-  peek p = ColoredNormalVertex
-   <$> Foreign.peekByteOff p (attributeLoc (layout @ColoredNormalVertex) 0)
-   <*> Foreign.peekByteOff p (attributeLoc (layout @ColoredNormalVertex) 1)
-   <*> Foreign.peekByteOff p (attributeLoc (layout @ColoredNormalVertex) 2)
-  poke p (ColoredNormalVertex a b c) = do
-       Foreign.pokeByteOff p (attributeLoc (layout @ColoredNormalVertex) 0) a
-       Foreign.pokeByteOff p (attributeLoc (layout @ColoredNormalVertex) 1) b
-       Foreign.pokeByteOff p (attributeLoc (layout @ColoredNormalVertex) 2) c
+type ColoredNormalVertex = Vec 3 :& Vec 3 :& Vec 3
 
 coloredNormalVertexSrc =
   """#version 430\r\n
@@ -644,15 +630,7 @@ coloredNormalFragmentSrc =
 
 --- BASIC POSITION SHADER ------------------------------------------------------
 
-newtype PositionVertex = PositionVertex (Vec 4) deriving (Show)
-instance Vertex PositionVertex where layout = [Attrib_vec4]
-instance Data.Vector.Storable.Storable PositionVertex where
-  sizeOf _ = attribsSize (layout @PositionVertex)
-  alignment _ = attribsAlignment (layout @PositionVertex)
-  peek p = PositionVertex
-   <$> Foreign.peekByteOff p (attributeLoc (layout @PositionVertex) 0)
-  poke p (PositionVertex a) = do
-       Foreign.pokeByteOff p (attributeLoc (layout @PositionVertex) 0) a
+type PositionVertex = Vec 4
 
 positionVertexSrc =
   """#version 430\r\n
@@ -670,45 +648,6 @@ positionFragmentSrc =
     fragmentColor = vec4(1,1,1,1);
   }
   """
-
-
---- GENERATE BUFFERS -----------------------------------------------------------
-
-class Index i where
-  flatten :: i -> [GL.GLushort]
-  indexDim :: Int
-
-instance Integral i => Index (i,i,i) where
-  flatten (a,b,c) = fromIntegral <$> [a,b,c]
-  indexDim = 3
-
-instance Integral i => Index (i,i) where
-  flatten (a,b) = fromIntegral <$> [a,b]
-  indexDim = 2
-
-data BufferMetadata = BufferMetadata { vertexArrayID :: GL.GLuint, indexCount :: GL.GLsizei } deriving Show
-
-genBuffer :: forall v i.(Data.Vector.Storable.Storable v, Vertex v, Index i) => [i] -> [v] -> IO BufferMetadata
-genBuffer indices verts = do
-  vertexArrayObjectID <- Foreign.alloca $ \idPtr -> do
-      GL.glGenVertexArrays 1 idPtr
-      Foreign.peek idPtr
-  GL.glBindVertexArray vertexArrayObjectID
-  Foreign.alloca $ \indexBufferIDPtr -> do
-      GL.glGenBuffers 1 indexBufferIDPtr
-      indexBufferID <- Foreign.peek indexBufferIDPtr
-      GL.glBindBuffer GL.GL_ELEMENT_ARRAY_BUFFER indexBufferID
-      let indexBufferContent :: [GL.GLushort] = concatMap flatten indices
-      let indexBufferSize = fromIntegral (size @GL.GLushort * length indexBufferContent)
-      Foreign.withArray indexBufferContent (flip (GL.glBufferData GL.GL_ELEMENT_ARRAY_BUFFER indexBufferSize) GL.GL_STATIC_DRAW)
-  Foreign.alloca $ \vertexBufferIDPtr -> do
-      GL.glGenBuffers 1 vertexBufferIDPtr
-      vertexBufferID <- Foreign.peek vertexBufferIDPtr
-      GL.glBindBuffer GL.GL_ARRAY_BUFFER vertexBufferID
-      let vertexBufferSize = fromIntegral (size @v * length verts)
-      Foreign.withArray verts (flip (GL.glBufferData GL.GL_ARRAY_BUFFER vertexBufferSize) GL.GL_STATIC_DRAW)
-  traverse (configureAttribute (layout @v)) [0..length (layout @v)-1]
-  pure (BufferMetadata { vertexArrayID = vertexArrayObjectID , indexCount = fromIntegral (indexDim @i * length indices) })
 
 
 
@@ -867,7 +806,7 @@ main = do
   --- LOAD OBJECTS -------------------------------------------------------------
 
 
-  let initializeObject obj = genBuffer (faces obj) (zipWith (\v n -> ColoredNormalVertex (position v) (color v) n) (vertices obj) (normals obj))
+  let initializeObject obj = genBuffer (faces obj) (zipWith (\v n -> position v :& color v :& n) (vertices obj) (normals obj))
   
   cubeMetadata <- initializeObject cubeObj
   pyramidMetadata <- initializeObject pyramidObj
@@ -925,7 +864,7 @@ main = do
 
   matMap <- sequenceA (Data.Map.Internal.fromSet readTex (Data.Set.fromList (material <$> triangles zigzagoon)))
 
-  skelly <- let pose = head (tail (smdPoses ziganim)) in genBuffer (roseEdges pose) (PositionVertex . snd <$> flattenRose pose)
+  skelly <- let pose = head (tail (smdPoses ziganim)) in genBuffer (roseEdges pose) (snd <$> flattenRose pose)
 
 
   --- MAIN LOOP ----------------------------------------------------------------
@@ -1001,7 +940,7 @@ main = do
         GL.glUseProgram skellyShader
         GL.glBindVertexArray (vertexArrayID skelly)
         setShaderUniform skellyShader "modelToProjectionMatrix" (toScreenspace zigTransform)
-        -- GL.glDrawElements GL.GL_LINES (indexCount skelly) GL.GL_UNSIGNED_SHORT Foreign.nullPtr
+        GL.glDrawElements GL.GL_LINES (indexCount skelly) GL.GL_UNSIGNED_SHORT Foreign.nullPtr
 
         unless (timeToQuit appState) (loop appState (tail animState))
 
