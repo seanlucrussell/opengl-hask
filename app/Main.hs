@@ -536,6 +536,7 @@ instance Data.Vector.Storable.Storable TexturedSkeletonVertex where
        Foreign.pokeByteOff p (attributeLoc (layout @TexturedSkeletonVertex) 3) d
        Foreign.pokeByteOff p (attributeLoc (layout @TexturedSkeletonVertex) 4) e
 
+
 texturedSkeletonVertexSrc = 
   """#version 430\r\n
   uniform mat4 modelToProjectionMatrix;
@@ -874,66 +875,57 @@ main = do
 
   teapotMetadata <- do
     let filename = "resources/teapot.obj"
-    src <- readFile filename
-    case MP.parse pObj filename src of
-      Left err -> error (show err)
-      Right teapot -> initializeObject teapot
+    readFile filename >>= either (error . show) initializeObject . MP.parse pObj filename
 
   zigzagoon <- do
     let filename = "resources/Zigzagoon/Zigzagoon.SMD"
-    src <- readFile filename
-    case MP.parse pSMD filename src of
-      Left err -> error (show err)
-      Right model -> pure (smdscale 0.03 model)
+    readFile filename >>= either (error . show) (pure . smdscale 0.03) . MP.parse pSMD filename
 
   ziganim <- do
     let filename = "resources/Zigzagoon/anims/Bounce.smd"
-    src <- readFile filename
-    case MP.parse pSMD filename src of
-      Left err -> error (show err)
-      Right model -> pure (smdscale 0.03 model)
+    readFile filename >>= either (error . show) (pure . smdscale 0.03) . MP.parse pSMD filename
 
   let readTex matName = do
-          tex <- Codec.Picture.readImage ("resources/Zigzagoon/images/" ++ matName)
-          case tex of
-            Left err -> error err
-            Right pic -> do
-              let img = Codec.Picture.convertRGBA8 pic
-              textureID <- Foreign.alloca $ \textureIDPtr -> do
-                  GL.glGenTextures 1 textureIDPtr
-                  Foreign.peek textureIDPtr
-              GL.glBindTexture GL.GL_TEXTURE_2D textureID
-              -- opengl textures start at the bottom left so gotta flip
-              let flippedY = Codec.Picture.generateImage
-                    (\x y -> Codec.Picture.pixelAt img x (Codec.Picture.imageHeight img - 1 - y))
-                    (Codec.Picture.imageWidth img) (Codec.Picture.imageHeight img)
-              Data.Vector.Storable.unsafeWith
-                 (Codec.Picture.imageData flippedY)
-                 (GL.glTexImage2D
-                    GL.GL_TEXTURE_2D
-                    0
-                    (fromIntegral GL.GL_SRGB8_ALPHA8)
-                    (fromIntegral (Codec.Picture.imageWidth img))
-                    (fromIntegral (Codec.Picture.imageHeight img))
-                    0
-                    GL.GL_RGBA
-                    GL.GL_UNSIGNED_BYTE
-                    . Foreign.castPtr)
-              GL.glPixelStorei GL.GL_UNPACK_ALIGNMENT 1
-              GL.glTexParameteri GL.GL_TEXTURE_2D GL.GL_TEXTURE_MIN_FILTER (fromIntegral GL.GL_LINEAR_MIPMAP_LINEAR)
-              GL.glTexParameteri GL.GL_TEXTURE_2D GL.GL_TEXTURE_MAG_FILTER (fromIntegral GL.GL_LINEAR)
-              GL.glTexParameteri GL.GL_TEXTURE_2D GL.GL_TEXTURE_WRAP_S (fromIntegral GL.GL_REPEAT)
-              GL.glTexParameteri GL.GL_TEXTURE_2D GL.GL_TEXTURE_WRAP_T (fromIntegral GL.GL_REPEAT)
-              GL.glGenerateMipmap GL.GL_TEXTURE_2D
-              let smd = zigzagoon {triangles = filter (\v -> material v == matName) (triangles zigzagoon)}
-              let smdTris = fmap (\n -> (3*n,3*n+1,3*n+2)) [0..length (triangles smd) - 1]
-              let smdVerts = concatMap (\v -> let (a,b,c) = verts v in [a,b,c]) (triangles smd)
-              md <- genBuffer smdTris (fmap smdToTexturedSkeletonVertex smdVerts)
-              pure (textureID,md)
+        tex <- Codec.Picture.readImage ("resources/Zigzagoon/images/" ++ matName)
+        case tex of
+          Left err -> error err
+          Right pic -> do
+            let img = Codec.Picture.convertRGBA8 pic
+            textureID <- Foreign.alloca $ \textureIDPtr -> do
+                GL.glGenTextures 1 textureIDPtr
+                Foreign.peek textureIDPtr
+            GL.glBindTexture GL.GL_TEXTURE_2D textureID
+            -- opengl textures start at the bottom left so gotta flip
+            let flippedY = Codec.Picture.generateImage
+                  (\x y -> Codec.Picture.pixelAt img x (Codec.Picture.imageHeight img - 1 - y))
+                  (Codec.Picture.imageWidth img) (Codec.Picture.imageHeight img)
+            Data.Vector.Storable.unsafeWith
+               (Codec.Picture.imageData flippedY)
+               (GL.glTexImage2D
+                  GL.GL_TEXTURE_2D
+                  0
+                  (fromIntegral GL.GL_SRGB8_ALPHA8)
+                  (fromIntegral (Codec.Picture.imageWidth img))
+                  (fromIntegral (Codec.Picture.imageHeight img))
+                  0
+                  GL.GL_RGBA
+                  GL.GL_UNSIGNED_BYTE
+                  . Foreign.castPtr)
+            GL.glPixelStorei GL.GL_UNPACK_ALIGNMENT 1
+            GL.glTexParameteri GL.GL_TEXTURE_2D GL.GL_TEXTURE_MIN_FILTER (fromIntegral GL.GL_LINEAR_MIPMAP_LINEAR)
+            GL.glTexParameteri GL.GL_TEXTURE_2D GL.GL_TEXTURE_MAG_FILTER (fromIntegral GL.GL_LINEAR)
+            GL.glTexParameteri GL.GL_TEXTURE_2D GL.GL_TEXTURE_WRAP_S (fromIntegral GL.GL_REPEAT)
+            GL.glTexParameteri GL.GL_TEXTURE_2D GL.GL_TEXTURE_WRAP_T (fromIntegral GL.GL_REPEAT)
+            GL.glGenerateMipmap GL.GL_TEXTURE_2D
+            let smd = zigzagoon {triangles = filter (\v -> material v == matName) (triangles zigzagoon)}
+            let smdTris = fmap (\n -> (3*n,3*n+1,3*n+2)) [0..length (triangles smd) - 1]
+            let smdVerts = concatMap (\v -> let (a,b,c) = verts v in [a,b,c]) (triangles smd)
+            md <- genBuffer smdTris (smdToTexturedSkeletonVertex <$> smdVerts)
+            pure (textureID,md)
 
   matMap <- sequenceA (Data.Map.Internal.fromSet readTex (Data.Set.fromList (material <$> triangles zigzagoon)))
 
-  skelly <- let pose = head $ tail (smdPoses ziganim) in genBuffer (roseEdges pose) (fmap (PositionVertex . snd) (flattenRose pose))
+  skelly <- let pose = head (tail (smdPoses ziganim)) in genBuffer (roseEdges pose) (PositionVertex . snd <$> flattenRose pose)
 
 
   --- MAIN LOOP ----------------------------------------------------------------
