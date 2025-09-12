@@ -863,10 +863,10 @@ main = do
   pictureFrame <-
      genBuffer @(Vec 3 :& Vec 2) @(Int,Int,Int)
         [(0,1,2),(2,1,3)]
-        [ v3 1 0 1 :& v2 1 1
-        , v3 1 0 (-1) :& v2 1 0
-        , v3 (-1) 0 1 :& v2 0 1
-        , v3 (-1) 0 (-1) :& v2 0 0
+        [ v3 1 0 1 :& v2 0 1
+        , v3 1 0 (-1) :& v2 0 0
+        , v3 (-1) 0 1 :& v2 1 1
+        , v3 (-1) 0 (-1) :& v2 1 0
         ]
 
   let readTex matName = do
