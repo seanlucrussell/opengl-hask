@@ -413,6 +413,7 @@ pose smd ref frame = zipWith (.)  (animposflat frame) (refposflat ref)
 --- GL UTILS -------------------------------------------------------------------
 
 class SetUniform u where setUniform :: GL.GLint -> u -> IO ()
+instance SetUniform Float where setUniform = GL.glUniform1f
 instance SetUniform (Vec 2) where setUniform loc v = Foreign.with v (GL.glUniform2fv loc 1 . Foreign.castPtr)
 instance SetUniform (Vec 3) where setUniform loc v = Foreign.with v (GL.glUniform3fv loc 1 . Foreign.castPtr)
 instance SetUniform (Vec 4) where setUniform loc v = Foreign.with v (GL.glUniform4fv loc 1 . Foreign.castPtr)
@@ -443,7 +444,10 @@ smdToTexturedSkeletonVertex v =
         _ -> v4 (-1) (-1) (-1) (-1))
 
 
---- ATTRIBUTE TYPES ------------------------------------------------------------
+--- VERTEX/ATTRIBUTE TYPES -----------------------------------------------------
+
+roundUp :: Int -> Int -> Int
+roundUp val base = (val + base - 1) `div` base * base
 
 data a :& b = a :& b deriving (Show)
 instance (Foreign.Storable a, Foreign.Storable b) => Foreign.Storable (a :& b) where
@@ -461,10 +465,6 @@ instance (Foreign.Storable s, KnownNat n) => Foreign.Storable (Array n s) where
     pure (Data.Vector.Storable.unsafeIndex (Data.Vector.Storable.fromListN n xs) . fromIntegral . getFinite)
   poke p f = mapM_ (\i -> Foreign.pokeElemOff (Foreign.castPtr p) (fromIntegral i) (f i)) (finites @n)
 
-roundUp :: Int -> Int -> Int
-roundUp val base = (val + base - 1) `div` base * base
-
-
 class Attribute a where configureAttribute :: GL.GLsizei -> GL.GLuint -> Foreign.Ptr p -> IO ()
 instance Attribute (Vec 2) where configureAttribute stride index = GL.glVertexAttribPointer index 2 GL.GL_FLOAT GL.GL_FALSE stride
 instance Attribute (Vec 3) where configureAttribute stride index = GL.glVertexAttribPointer index 3 GL.GL_FLOAT GL.GL_FALSE stride
@@ -473,23 +473,24 @@ instance Attribute (Array 2 GL.GLint) where configureAttribute stride index = GL
 instance Attribute (Array 3 GL.GLint) where configureAttribute stride index = GL.glVertexAttribIPointer index 3 GL.GL_INT stride
 instance Attribute (Array 4 GL.GLint) where configureAttribute stride index = GL.glVertexAttribIPointer index 4 GL.GL_INT stride
 
-
--- ig we assume that the input pointer starts aligned. only need to fix alignment during concatenation
-class Vertex v where attrconf :: GL.GLsizei -> GL.GLuint -> Foreign.Ptr a -> (GL.GLuint -> Foreign.Ptr a -> IO ()) -> IO ()
+class Vertex v where
+  configureAttributesOpen :: GL.GLsizei -> GL.GLuint -> Foreign.Ptr a -> (GL.GLuint -> Foreign.Ptr a -> IO ()) -> IO ()
 
 instance {-# OVERLAPPABLE #-} (Attribute a, Foreign.Storable a) => Vertex a where
-  attrconf stride index offset cont = do
+  configureAttributesOpen stride index offset cont = do
+    let alignedOffset = Foreign.alignPtr offset (alignment @a)
     GL.glEnableVertexAttribArray index
-    configureAttribute @a stride index offset
-    cont (index+1) (Foreign.plusPtr offset (size @a))
+    configureAttribute @a stride index alignedOffset
+    cont (index+1) (Foreign.plusPtr alignedOffset (size @a))
 
 instance {-# OVERLAPPING #-} (Foreign.Storable b, Vertex a, Vertex b) => Vertex (a :& b) where
-  attrconf stride index0 offset0 cont =
-     attrconf @a stride index0 offset0
-       (\index1 offset1 -> attrconf @b stride index1 (Foreign.alignPtr offset1 (alignment @b)) cont)
+  configureAttributesOpen stride index0 offset0 cont =
+     configureAttributesOpen @a stride index0 offset0
+         (\index1 offset1 -> configureAttributesOpen @b stride index1 offset1 cont)
 
-runattrconf :: forall v.(Foreign.Storable v, Vertex v) => IO ()
-runattrconf = attrconf @v (fromIntegral (size @v)) 0 Foreign.nullPtr (\_ _ -> pure ())
+configureAttributes :: forall v.(Foreign.Storable v, Vertex v) => IO ()
+configureAttributes = configureAttributesOpen @v (fromIntegral (size @v)) 0 Foreign.nullPtr (\_ _ -> pure ())
+
 
 
 --- GENERATE BUFFERS -----------------------------------------------------------
@@ -527,8 +528,7 @@ genBuffer indices verts = do
       GL.glBindBuffer GL.GL_ARRAY_BUFFER vertexBufferID
       let vertexBufferSize = fromIntegral (size @v * length verts)
       Foreign.withArray verts (flip (GL.glBufferData GL.GL_ARRAY_BUFFER vertexBufferSize) GL.GL_STATIC_DRAW)
-  runattrconf @v
-  -- configureAttributes @v
+  configureAttributes @v
   pure (BufferMetadata { vertexArrayID = vertexArrayObjectID , indexCount = fromIntegral (indexDim @i * length indices) })
 
 --- TEXTURED SKELETON SHADER ---------------------------------------------------
@@ -646,6 +646,41 @@ positionFragmentSrc =
   out vec4 fragmentColor;
   void main() {
     fragmentColor = vec4(1,1,1,1);
+  }
+  """
+
+
+
+--- PICTURE FRAME SHADER -------------------------------------------------------
+
+type PictureVertex = Vec 4
+
+pictureVertexSrc =
+  """#version 430\r\n
+  uniform mat4 modelToProjectionMatrix;
+  uniform float aspectRatio;
+  in layout(location=0) vec4 vertexPositionModelSpace;
+  in layout(location=1) vec2 vertex_uv;
+  out vec2 fragment_uv;
+  void main() {
+    mat4 scaler = mat4 (
+      aspectRatio,0,0,0,
+      0,1,0,0,
+      0,0,1,0,
+      0,0,0,1
+    );
+    gl_Position = modelToProjectionMatrix * scaler * vertexPositionModelSpace;
+    fragment_uv = vertex_uv;
+  }
+  """
+
+pictureFragmentSrc =
+  """#version 430\r\n
+  uniform sampler2D base_texture;
+  in vec2 fragment_uv;
+  out vec4 fragmentColor;
+  void main() {
+    fragmentColor = texture(base_texture,fragment_uv);
   }
   """
 
@@ -801,6 +836,7 @@ main = do
   basicShader <- initShader coloredNormalVertexSrc coloredNormalFragmentSrc
   textureShader <- initShader texturedSkeletonVertexSrc texturedSkeletonFragmentSrc
   skellyShader <- initShader positionVertexSrc positionFragmentSrc
+  pictureShader <- initShader pictureVertexSrc pictureFragmentSrc
 
 
   --- LOAD OBJECTS -------------------------------------------------------------
@@ -823,6 +859,15 @@ main = do
   ziganim <- do
     let filename = "resources/Zigzagoon/anims/Bounce.smd"
     readFile filename >>= either (error . show) (pure . smdscale 0.03) . MP.parse pSMD filename
+
+  pictureFrame <-
+     genBuffer @(Vec 3 :& Vec 2) @(Int,Int,Int)
+        [(0,1,2),(2,1,3)]
+        [ v3 1 0 1 :& v2 1 1
+        , v3 1 0 (-1) :& v2 1 0
+        , v3 (-1) 0 1 :& v2 0 1
+        , v3 (-1) 0 (-1) :& v2 0 0
+        ]
 
   let readTex matName = do
         tex <- Codec.Picture.readImage ("resources/Zigzagoon/images/" ++ matName)
@@ -861,6 +906,41 @@ main = do
             let smdVerts = concatMap (\v -> let (a,b,c) = verts v in [a,b,c]) (triangles smd)
             md <- genBuffer smdTris (smdToTexturedSkeletonVertex <$> smdVerts)
             pure (textureID,md)
+
+  tour <- do
+    tex <- Codec.Picture.readImage ("resources/tour-of-the-universe-mccall-studios-1.jpg")
+    case tex of
+      Left err -> error err
+      Right pic -> do
+        let img = Codec.Picture.convertRGBA8 pic
+        textureID <- Foreign.alloca $ \textureIDPtr -> do
+            GL.glGenTextures 1 textureIDPtr
+            Foreign.peek textureIDPtr
+        GL.glBindTexture GL.GL_TEXTURE_2D textureID
+        -- opengl textures start at the bottom left so gotta flip
+        let flippedY = Codec.Picture.generateImage
+              (\x y -> Codec.Picture.pixelAt img x (Codec.Picture.imageHeight img - 1 - y))
+              (Codec.Picture.imageWidth img) (Codec.Picture.imageHeight img)
+        Data.Vector.Storable.unsafeWith
+           (Codec.Picture.imageData flippedY)
+           (GL.glTexImage2D
+              GL.GL_TEXTURE_2D
+              0
+              (fromIntegral GL.GL_SRGB8_ALPHA8)
+              (fromIntegral (Codec.Picture.imageWidth img))
+              (fromIntegral (Codec.Picture.imageHeight img))
+              0
+              GL.GL_RGBA
+              GL.GL_UNSIGNED_BYTE
+              . Foreign.castPtr)
+        GL.glPixelStorei GL.GL_UNPACK_ALIGNMENT 1
+        GL.glTexParameteri GL.GL_TEXTURE_2D GL.GL_TEXTURE_MIN_FILTER (fromIntegral GL.GL_LINEAR_MIPMAP_LINEAR)
+        GL.glTexParameteri GL.GL_TEXTURE_2D GL.GL_TEXTURE_MAG_FILTER (fromIntegral GL.GL_LINEAR)
+        GL.glTexParameteri GL.GL_TEXTURE_2D GL.GL_TEXTURE_WRAP_S (fromIntegral GL.GL_REPEAT)
+        GL.glTexParameteri GL.GL_TEXTURE_2D GL.GL_TEXTURE_WRAP_T (fromIntegral GL.GL_REPEAT)
+        GL.glGenerateMipmap GL.GL_TEXTURE_2D
+        let aspectRatio = fromIntegral (Codec.Picture.imageWidth img) / fromIntegral (Codec.Picture.imageHeight img)
+        pure (textureID,aspectRatio)
 
   matMap <- sequenceA (Data.Map.Internal.fromSet readTex (Data.Set.fromList (material <$> triangles zigzagoon)))
 
@@ -936,11 +1016,24 @@ main = do
                 drawTriangulation textureShader zigMetadata zigTransform)
            matMap
 
+
+        let portraitTransform = translate (v3 (-12) (2) 0) . rotation 90 (v3 0 (-1) 0) . rotation 90 (v3 (-1) 0 0)
+        GL.glActiveTexture GL.GL_TEXTURE0
+        GL.glBindTexture GL.GL_TEXTURE_2D (fst tour)
+        Foreign.C.String.withCString "texture" (GL.glGetUniformLocation pictureShader) >>= flip GL.glUniform1i 0
+        GL.glUseProgram pictureShader
+        GL.glBindVertexArray (vertexArrayID pictureFrame)
+        setShaderUniform pictureShader "aspectRatio" (snd tour :: Float)
+        setShaderUniform pictureShader "modelToProjectionMatrix" (toScreenspace portraitTransform)
+        GL.glDrawElements GL.GL_TRIANGLES 6 GL.GL_UNSIGNED_SHORT Foreign.nullPtr
+        
+
         GL.glClear GL.GL_DEPTH_BUFFER_BIT
         GL.glUseProgram skellyShader
         GL.glBindVertexArray (vertexArrayID skelly)
         setShaderUniform skellyShader "modelToProjectionMatrix" (toScreenspace zigTransform)
         GL.glDrawElements GL.GL_LINES (indexCount skelly) GL.GL_UNSIGNED_SHORT Foreign.nullPtr
+
 
         unless (timeToQuit appState) (loop appState (tail animState))
 
