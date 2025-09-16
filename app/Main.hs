@@ -89,8 +89,8 @@ projection fov aspect near far v =
 
 append v x = maybe x v . strengthen
 
-rotation :: Float -> Vec 3 -> Vec 4 -> Vec 4
-rotation angle axis v =
+rotateAround :: Vec 3 -> Float -> Vec 4 -> Vec 4
+rotateAround axis angle v =
   let
     theta = pure (pi * angle / 180)
     u     = normalize axis
@@ -128,6 +128,13 @@ worldToViewMatrix position viewDirection = lookAt position (position + viewDirec
 memo :: forall a. KnownNat a => Vec a -> Vec a
 memo v = (Data.Array.!) (Data.Array.listArray (0, fromIntegral (maxBound :: Finite a)) (map v finites)) . fromIntegral
 
+
+north :: Vec 3 = v3 1 0 0
+south :: Vec 3 = v3 (-1) 0 0
+east :: Vec 3 = v3 0 0 1
+west :: Vec 3 = v3 0 0 (-1)
+up :: Vec 3 = v3 0 1 0
+down :: Vec 3 = v3 0 (-1) 0
 
 --- OBJ PARSER -----------------------------------------------------------------
 
@@ -340,9 +347,9 @@ smdPoseTransforms smd frame =
                  transform
                  . memo
                  . translate (pos bone)
-                 . rotation (180/pi * rot bone z) (v3 0 0 1)
-                 . rotation (180/pi * rot bone y) (v3 0 1 0)
-                 . rotation (180/pi * rot bone x) (v3 1 0 0)
+                 . rotateAround (v3 0 0 1) (180/pi * rot bone z)
+                 . rotateAround (v3 0 1 0) (180/pi * rot bone y)
+                 . rotateAround (v3 1 0 0) (180/pi * rot bone x)
          in Rose (boneId bone, newTransform) (subtree newTransform <$> maybe [] id (Data.Map.lookup n childMap))
   in subtree id 0
 
@@ -355,9 +362,9 @@ smdReferencePoseTransform smd frame =
        let bone = bones frame !! n
            newTransform =
              memo
-             . rotation (-180/pi * rot bone x) (v3 1 0 0)
-             . rotation (-180/pi * rot bone y) (v3 0 1 0)
-             . rotation (-180/pi * rot bone z) (v3 0 0 1)
+             . rotateAround (v3 1 0 0) (-180/pi * rot bone x)
+             . rotateAround (v3 0 1 0) (-180/pi * rot bone y)
+             . rotateAround (v3 0 0 1) (-180/pi * rot bone z)
              . translate (-pos bone)
              . transform
        in Rose (boneId bone, newTransform) (subtree newTransform <$> maybe [] id (Data.Map.lookup n childMap))
@@ -383,11 +390,11 @@ pose smd ref frame = zipWith (.)  (animposflat frame) (refposflat ref)
                      . memo
                      . translate (pos bone)
                      . memo
-                     . rotation (180/pi * rot bone z) (v3 0 0 1)
+                     . rotateAround (v3 0 0 1) (180/pi * rot bone z)
                      . memo
-                     . rotation (180/pi * rot bone y) (v3 0 1 0)
+                     . rotateAround (v3 0 1 0) (180/pi * rot bone y)
                      . memo
-                     . rotation (180/pi * rot bone x) (v3 1 0 0)
+                     . rotateAround (v3 1 0 0) (180/pi * rot bone x)
              in Rose (boneId bone, newTransform) (subtree newTransform <$> maybe [] id (Data.Map.lookup n childMap))
       in subtree id 0
     smdReferencePoseTransform frame =
@@ -395,11 +402,11 @@ pose smd ref frame = zipWith (.)  (animposflat frame) (refposflat ref)
            let bone = bones frame !! n
                newTransform =
                  memo
-                 . rotation (-180/pi * rot bone x) (v3 1 0 0)
+                 . rotateAround (v3 1 0 0) (-180/pi * rot bone x)
                  . memo
-                 . rotation (-180/pi * rot bone y) (v3 0 1 0)
+                 . rotateAround (v3 0 1 0) (-180/pi * rot bone y)
                  . memo
-                 . rotation (-180/pi * rot bone z) (v3 0 0 1)
+                 . rotateAround (v3 0 0 1) (-180/pi * rot bone z)
                  . memo
                  . translate (-pos bone)
                  . memo
@@ -414,6 +421,7 @@ pose smd ref frame = zipWith (.)  (animposflat frame) (refposflat ref)
 
 class SetUniform u where setUniform :: GL.GLint -> u -> IO ()
 instance SetUniform Float where setUniform = GL.glUniform1f
+instance SetUniform Int where setUniform loc = GL.glUniform1i loc . fromIntegral
 instance SetUniform (Vec 2) where setUniform loc v = Foreign.with v (GL.glUniform2fv loc 1 . Foreign.castPtr)
 instance SetUniform (Vec 3) where setUniform loc v = Foreign.with v (GL.glUniform3fv loc 1 . Foreign.castPtr)
 instance SetUniform (Vec 4) where setUniform loc v = Foreign.with v (GL.glUniform4fv loc 1 . Foreign.castPtr)
@@ -506,6 +514,10 @@ instance Integral i => Index (i,i,i) where
 instance Integral i => Index (i,i) where
   flatten (a,b) = fromIntegral <$> [a,b]
   indexDim = 2
+
+instance Index Int where
+  flatten = pure . fromIntegral
+  indexDim = 1
 
 data BufferMetadata = BufferMetadata { vertexArrayID :: GL.GLuint, indexCount :: GL.GLsizei } deriving Show
 
@@ -611,6 +623,7 @@ coloredNormalFragmentSrc =
   uniform vec3 lightPosition;
   uniform vec3 eyePosition;
   uniform vec4 ambientLight;
+  uniform int specularity;
   in vec3 normalWorldSpace;
   in vec3 vertexPositionWorldSpace;
   in vec3 color;
@@ -621,12 +634,72 @@ coloredNormalFragmentSrc =
     vec4 diffuseLight = vec4(brightness,brightness,brightness,1.0);
     vec3 reflectedLightWorldSpace = reflect(-lightVectorWorldSpace,normalWorldSpace);
     vec3 eyeVectorWorldSpace = normalize(eyePosition - vertexPositionWorldSpace);
-    float s = pow(clamp(dot(reflectedLightWorldSpace, eyeVectorWorldSpace),0,1),64);
-    vec4 specularLight = vec4(s,s,s,1.0);
+    float s = pow(clamp(dot(reflectedLightWorldSpace, eyeVectorWorldSpace),0,1),specularity);
+    vec4 specularLight = vec4(s,s,s,s);
     vec4 lighting = clamp(diffuseLight,0.0,1.0) + ambientLight + clamp(specularLight,0,1);
     fragmentColor = lighting * vec4(color,1);
   }
   """
+
+--- SPARKLE SHADER -------------------------------------------------------------
+
+type SparkleVertex = Vec 3 :& Vec 3 :& Vec 3
+
+sparkleVertexSrc =
+  """#version 430\r\n
+  uniform mat4 modelToProjectionMatrix;
+  uniform mat4 modelToWorldTransformMatrix;
+  in layout(location=0) vec4 vertexPositionModelSpace;
+  in layout(location=1) vec3 vertexColor;
+  in layout(location=2) vec3 normalModelSpace;
+  out vec3 normalWorldSpace;
+  out vec3 color;
+  out vec3 vertexPositionWorldSpace;
+  void main() {
+    gl_Position = modelToProjectionMatrix * vertexPositionModelSpace;
+    color = vertexColor;
+    normalWorldSpace = vec3(modelToWorldTransformMatrix * vec4(normalModelSpace,0));
+    vertexPositionWorldSpace = vec3(modelToWorldTransformMatrix * vertexPositionModelSpace);
+  }
+  """
+
+sparkleFragmentSrc =
+  """#version 430\r\n
+  uniform vec3 lightPosition;
+  uniform vec3 eyePosition;
+  uniform int specularity;
+  in vec3 normalWorldSpace;
+  in vec3 vertexPositionWorldSpace;
+  in vec3 color;
+  out vec4 fragmentColor;
+  void main() {
+    vec3 lightVectorWorldSpace = normalize(lightPosition - vertexPositionWorldSpace);
+    float brightness = dot(lightVectorWorldSpace, normalize(normalWorldSpace));
+    vec3 reflectedLightWorldSpace = reflect(-lightVectorWorldSpace,normalWorldSpace);
+    vec3 eyeVectorWorldSpace = normalize(eyePosition - vertexPositionWorldSpace);
+    float s = clamp(pow(clamp(dot(reflectedLightWorldSpace, eyeVectorWorldSpace),0,1),specularity),0,1);
+    //if (s < 0.1) {
+    //  fragmentColor = vec4(0,0,0,0);
+    //} else {
+    //  fragmentColor = vec4(s,s,s,s) * vec4(color,1);
+    //}
+    fragmentColor = vec4(s,s,s,s) * vec4(color,1);
+  }
+  """
+
+lorenzComputeSrc =
+  """#version 430\r\n
+  layout(local_size_x=256) in;
+  layout(std430,binding=0) buffer InPos {vec4 inPos[];};
+  layout(std430,binding=0) buffer OutPos {vec4 outPos[];};
+  uniform uint N;
+  void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= N) return;
+    outPos[i] = inPos[i] + vec4(0.01,0,0,1);
+  }
+  """
+
 
 --- BASIC POSITION SHADER ------------------------------------------------------
 
@@ -715,7 +788,7 @@ initialAppState = AppState
         { timeToQuit = False
         , windowWidth = 800
         , windowHeight = 600
-        , viewDirection = v4 0 0 (-1) 1
+        , viewDirection = maybe 1 west . strengthen
         , cameraYaw = 0
         , cameraPitch = 0
         , cameraPosition = v4 0 0 0 1
@@ -739,8 +812,8 @@ handleEvent event appState = case SDL.eventPayload event of
         yawUpdate = - fromIntegral x / 3
     in appState
         { viewDirection = memo
-            ( rotation pitchUpdate (cross (viewDirection appState . weaken) (v3 0 1 0))
-            ( rotation yawUpdate (v3 0 1 0) (viewDirection appState)))
+            ( rotateAround (cross (viewDirection appState . weaken) (v3 0 1 0)) pitchUpdate
+            ( rotateAround (v3 0 1 0) yawUpdate (viewDirection appState)))
         , cameraYaw = cameraYaw appState + yawUpdate
         , cameraPitch = cameraPitch appState + pitchUpdate
         }
@@ -782,6 +855,42 @@ main = do
    
 
   --- CONFIGURE SHADERS --------------------------------------------------------
+
+  let initComputeShader computeShaderCode = do
+        programID <- GL.glCreateProgram
+        computeShaderID <- GL.glCreateShader GL.GL_COMPUTE_SHADER
+        Foreign.C.String.withCString computeShaderCode (\cstr -> Foreign.with cstr $ \cstrPtr ->
+          GL.glShaderSource computeShaderID 1 cstrPtr Foreign.nullPtr)
+        GL.glCompileShader computeShaderID
+        Foreign.alloca $ \compileStatusPtr -> do
+          GL.glGetShaderiv computeShaderID GL.GL_COMPILE_STATUS compileStatusPtr
+          compileStatus <- Foreign.peek compileStatusPtr
+          when (compileStatus /= 1) $ do
+            Foreign.alloca $ \infoLogLengthPtr -> do
+              GL.glGetShaderiv computeShaderID GL.GL_INFO_LOG_LENGTH infoLogLengthPtr
+              infoLogLength <- Foreign.peek infoLogLengthPtr
+              Foreign.allocaArray (fromIntegral infoLogLength) $ \logPtr -> do
+                GL.glGetShaderInfoLog computeShaderID infoLogLength Foreign.nullPtr logPtr
+                errorMessage <- Foreign.C.String.peekCString logPtr
+                error errorMessage
+        GL.glAttachShader programID computeShaderID
+        GL.glDeleteShader computeShaderID
+        GL.glLinkProgram programID
+        Foreign.alloca $ \linkStatusPtr -> do
+          GL.glGetProgramiv programID GL.GL_LINK_STATUS linkStatusPtr
+          linkStatus <- Foreign.peek linkStatusPtr
+          when (linkStatus /= 1) $ do
+            Foreign.alloca $ \infoLogLengthPtr -> do
+              GL.glGetProgramiv programID GL.GL_INFO_LOG_LENGTH infoLogLengthPtr
+              infoLogLength <- Foreign.peek infoLogLengthPtr
+              Foreign.allocaArray (fromIntegral infoLogLength) $ \logPtr -> do
+                GL.glGetProgramInfoLog programID infoLogLength Foreign.nullPtr logPtr
+                errorMessage <- Foreign.C.String.peekCString logPtr
+                error errorMessage
+        pure programID
+
+  lorenzComputeShader <- initComputeShader lorenzComputeSrc
+
 
   let initShader vertexShaderCode fragmentShaderCode = do
         programID <- GL.glCreateProgram
@@ -833,7 +942,10 @@ main = do
                 error errorMessage
         pure programID
 
+
+
   basicShader <- initShader coloredNormalVertexSrc coloredNormalFragmentSrc
+  sparkleShader <- initShader sparkleVertexSrc sparkleFragmentSrc
   textureShader <- initShader texturedSkeletonVertexSrc texturedSkeletonFragmentSrc
   skellyShader <- initShader positionVertexSrc positionFragmentSrc
   pictureShader <- initShader pictureVertexSrc pictureFragmentSrc
@@ -847,6 +959,17 @@ main = do
   cubeMetadata <- initializeObject cubeObj
   pyramidMetadata <- initializeObject pyramidObj
   planeMetadata <- initializeObject planeObj
+
+  pointCloudMetadata <- do
+    let numPoints = 100000 :: Int
+    let randVec = v3 <$> System.Random.randomIO <*> System.Random.randomIO <*> System.Random.randomIO
+    vertices <- sequenceA (replicate numPoints (do
+      x <- randVec
+      -- y <- randVec
+      let y = v3 1 1 1
+      z <- randVec
+      pure ((2 * x) :& y :& (normalize (z - v3 0.5 0.5 0.5)))))
+    genBuffer [0..numPoints] vertices
 
   teapotMetadata <- do
     let filename = "resources/teapot.obj"
@@ -875,14 +998,14 @@ main = do
           Left err -> error err
           Right pic -> do
             let img = Codec.Picture.convertRGBA8 pic
-            textureID <- Foreign.alloca $ \textureIDPtr -> do
-                GL.glGenTextures 1 textureIDPtr
-                Foreign.peek textureIDPtr
-            GL.glBindTexture GL.GL_TEXTURE_2D textureID
             -- opengl textures start at the bottom left so gotta flip
             let flippedY = Codec.Picture.generateImage
                   (\x y -> Codec.Picture.pixelAt img x (Codec.Picture.imageHeight img - 1 - y))
                   (Codec.Picture.imageWidth img) (Codec.Picture.imageHeight img)
+            textureID <- Foreign.alloca $ \textureIDPtr -> do
+                GL.glGenTextures 1 textureIDPtr
+                Foreign.peek textureIDPtr
+            GL.glBindTexture GL.GL_TEXTURE_2D textureID
             Data.Vector.Storable.unsafeWith
                (Codec.Picture.imageData flippedY)
                (GL.glTexImage2D
@@ -908,19 +1031,19 @@ main = do
             pure (textureID,md)
 
   tour <- do
-    tex <- Codec.Picture.readImage ("resources/tour-of-the-universe-mccall-studios-1.jpg")
+    tex <- Codec.Picture.readImage "resources/tour-of-the-universe-mccall-studios-1.jpg"
     case tex of
       Left err -> error err
       Right pic -> do
         let img = Codec.Picture.convertRGBA8 pic
-        textureID <- Foreign.alloca $ \textureIDPtr -> do
-            GL.glGenTextures 1 textureIDPtr
-            Foreign.peek textureIDPtr
-        GL.glBindTexture GL.GL_TEXTURE_2D textureID
         -- opengl textures start at the bottom left so gotta flip
         let flippedY = Codec.Picture.generateImage
               (\x y -> Codec.Picture.pixelAt img x (Codec.Picture.imageHeight img - 1 - y))
               (Codec.Picture.imageWidth img) (Codec.Picture.imageHeight img)
+        textureID <- Foreign.alloca $ \textureIDPtr -> do
+            GL.glGenTextures 1 textureIDPtr
+            Foreign.peek textureIDPtr
+        GL.glBindTexture GL.GL_TEXTURE_2D textureID
         Data.Vector.Storable.unsafeWith
            (Codec.Picture.imageData flippedY)
            (GL.glTexImage2D
@@ -947,9 +1070,24 @@ main = do
   skelly <- let pose = head (tail (smdPoses ziganim)) in genBuffer (roseEdges pose) (snd <$> flattenRose pose)
 
 
+
+
+  --- CONFIGURE COMPUTE SHADER -------------------------------------------------
+  
+  ssboA <- Foreign.alloca $ \ssboAPtr -> do
+    GL.glCreateBuffers 1 ssboAPtr
+    Foreign.peek ssboAPtr
+  let initialPositions = [(fromIntegral s) * v4 1 1 1 1 / 1000 | s <- [0..1000]]
+  let initialPositionsSize = fromIntegral (size @(Vec 4) * length initialPositions)
+  Foreign.withArray initialPositions (\ptr -> GL.glNamedBufferStorage ssboA initialPositionsSize ptr 0)
+  ssboB <- Foreign.alloca $ \ssboBPtr -> do
+    GL.glCreateBuffers 1 ssboBPtr
+    Foreign.peek ssboBPtr
+  GL.glNamedBufferStorage ssboB initialPositionsSize Foreign.nullPtr 0
+
   --- MAIN LOOP ----------------------------------------------------------------
   
-  let loop prevAppState animState = do
+  let loop prevAppState animState theta bufferFlipFlop = do
 
 
         --- HANDLE EVENTS ------------------------------------------------------
@@ -969,6 +1107,16 @@ main = do
           (GL.glViewport 0 0 (fromIntegral (windowWidth appState)) (fromIntegral (windowHeight appState)))
         SDL.glSwapWindow window
 
+        --- COMPUTE SHADER -----------------------------------------------------
+
+        let inBuf = if bufferFlipFlop then ssboB else ssboA
+        let outBuf = if bufferFlipFlop then ssboA else ssboB
+        GL.glUseProgram lorenzComputeShader
+        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 0 inBuf
+        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 1 outBuf
+        setShaderUniform lorenzComputeShader "N" (length initialPositions) 
+        GL.glDispatchCompute ((fromIntegral (length initialPositions) + 255) `div` 256) 1 1
+        GL.glMemoryBarrier GL.GL_SHADER_STORAGE_BARRIER_BIT
 
         --- DRAW ---------------------------------------------------------------
         
@@ -984,20 +1132,38 @@ main = do
               setShaderUniform shader "modelToWorldTransformMatrix" transform
               setShaderUniform shader "modelToProjectionMatrix" (toScreenspace transform)
               GL.glDrawElements GL.GL_TRIANGLES (indexCount obj) GL.GL_UNSIGNED_SHORT Foreign.nullPtr
-        let lightPosition = v3 3 0 2
+        let lightPosition = 3*north + 2*east
 
         GL.glUseProgram basicShader
         setShaderUniform basicShader "ambientLight" (v4 0.3 0.3 0.3 1)
+        setShaderUniform basicShader "specularity" (64 :: Int)
         setShaderUniform basicShader "lightPosition" lightPosition
         setShaderUniform basicShader "eyePosition" (cameraPosition appState . weaken)
 
-        drawTriangulation basicShader cubeMetadata (translate (v3 1 0 (-4)) . rotation 45 (v3 1 1 0))
-        drawTriangulation basicShader cubeMetadata (translate (v3 (-1) 0 (-4)) . rotation 45 (v3 1 1 1))
-        drawTriangulation basicShader pyramidMetadata (translate (v3 0 0 (-2)))
-        drawTriangulation basicShader planeMetadata (translate (v3 0 (-2) (-4)))
-        drawTriangulation basicShader teapotMetadata (translate (v3 3 1 (-8)))
+        drawTriangulation basicShader cubeMetadata (translate (north + 4*west) . rotateAround (v3 1 1 0) 45)
+        drawTriangulation basicShader cubeMetadata (translate (south + 4*west) . rotateAround (v3 1 1 1) 45)
+        drawTriangulation basicShader pyramidMetadata (translate (2*west))
+        drawTriangulation basicShader planeMetadata (translate (2*down + 4*west))
+        drawTriangulation basicShader teapotMetadata (translate (3*north + up + 8*west))
 
-        let zigTransform = translate (v3 (-2) (-2) (-1)) . rotation 45 (v3 0 1 0) . rotation 90 (v3 (-1) 0 0)
+
+        GL.glEnable GL.GL_BLEND
+        GL.glBlendFunc GL.GL_SRC_ALPHA GL.GL_ONE_MINUS_SRC_ALPHA
+        GL.glDepthMask GL.GL_FALSE
+        GL.glUseProgram sparkleShader
+        let pointCloudTransform = translate (west + north * 13) . rotateAround (v3 1 1 1) theta
+        GL.glBindVertexArray (vertexArrayID pointCloudMetadata)
+        setShaderUniform sparkleShader "lightPosition" lightPosition
+        setShaderUniform sparkleShader "eyePosition" (cameraPosition appState . weaken)
+        setShaderUniform sparkleShader "specularity" (1024 :: Int)
+        setShaderUniform sparkleShader "modelToWorldTransformMatrix" pointCloudTransform
+        setShaderUniform sparkleShader "modelToProjectionMatrix" (toScreenspace pointCloudTransform)
+        GL.glDrawElements GL.GL_POINTS (indexCount pointCloudMetadata) GL.GL_UNSIGNED_SHORT Foreign.nullPtr
+        GL.glDepthMask GL.GL_TRUE
+        GL.glDisable GL.GL_BLEND
+        
+
+        let zigTransform = translate (2*south + 2*down + west) . rotateAround up 45 . rotateAround south 90
 
         GL.glUseProgram textureShader
 
@@ -1017,7 +1183,7 @@ main = do
            matMap
 
 
-        let portraitTransform = translate (v3 (-12) (2) 0) . rotation 90 (v3 0 (-1) 0) . rotation 90 (v3 (-1) 0 0)
+        let portraitTransform = translate (12*south + 2*up) . rotateAround down 90 . rotateAround south 90
         GL.glActiveTexture GL.GL_TEXTURE0
         GL.glBindTexture GL.GL_TEXTURE_2D (fst tour)
         Foreign.C.String.withCString "texture" (GL.glGetUniformLocation pictureShader) >>= flip GL.glUniform1i 0
@@ -1032,12 +1198,12 @@ main = do
         GL.glUseProgram skellyShader
         GL.glBindVertexArray (vertexArrayID skelly)
         setShaderUniform skellyShader "modelToProjectionMatrix" (toScreenspace zigTransform)
-        GL.glDrawElements GL.GL_LINES (indexCount skelly) GL.GL_UNSIGNED_SHORT Foreign.nullPtr
+        -- GL.glDrawElements GL.GL_LINES (indexCount skelly) GL.GL_UNSIGNED_SHORT Foreign.nullPtr
 
 
-        unless (timeToQuit appState) (loop appState (tail animState))
+        unless (timeToQuit appState) (loop appState (tail animState) (theta + 0.1) (not bufferFlipFlop))
 
-  loop initialAppState (cycle (skeleton ziganim))
+  loop initialAppState (cycle (skeleton ziganim)) 0 False
 
 
   --- CLEANUP ------------------------------------------------------------------
