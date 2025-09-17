@@ -649,47 +649,22 @@ sparkleVertexSrc =
   """#version 430\r\n
   layout(std430, binding=1) buffer OutPos {vec4 pos[];};
   uniform mat4 modelToProjectionMatrix;
-  uniform mat4 modelToWorldTransformMatrix;
-  //in layout(location=0) vec4 vertexPositionModelSpace;
-  //in layout(location=1) vec3 vertexColor;
-  //in layout(location=2) vec3 normalModelSpace;
-  out vec3 normalWorldSpace;
-  out vec3 color;
-  out vec3 vertexPositionWorldSpace;
+  out float opacity;
   void main() {
-    vec3 vertexColor = vec3(1,1,1);
-    vec3 normalModelSpace = vec3(1,1,1);
     vec4 vertexPositionModelSpace = pos[gl_VertexID];
     gl_Position = modelToProjectionMatrix * vertexPositionModelSpace;
-    color = vertexColor;
-    normalWorldSpace = vec3(modelToWorldTransformMatrix * vec4(normalModelSpace,0));
-    vertexPositionWorldSpace = vec3(modelToWorldTransformMatrix * vertexPositionModelSpace);
     gl_PointSize = 1;
+    opacity = pow((1-gl_Position.z/gl_Position.w)/2,0.5);
   }
   """
 
 sparkleFragmentSrc =
   """#version 430\r\n
-  uniform vec3 lightPosition;
-  uniform vec3 eyePosition;
-  uniform int specularity;
-  in vec3 normalWorldSpace;
-  in vec3 vertexPositionWorldSpace;
-  in vec3 color;
   out vec4 fragmentColor;
+  in float opacity;
   void main() {
-    vec3 lightVectorWorldSpace = normalize(lightPosition - vertexPositionWorldSpace);
-    float brightness = dot(lightVectorWorldSpace, normalize(normalWorldSpace));
-    vec3 reflectedLightWorldSpace = reflect(-lightVectorWorldSpace,normalWorldSpace);
-    vec3 eyeVectorWorldSpace = normalize(eyePosition - vertexPositionWorldSpace);
-    float s = clamp(pow(clamp(dot(reflectedLightWorldSpace, eyeVectorWorldSpace),0,1),specularity),0,1);
-    //if (s < 0.1) {
-    //  fragmentColor = vec4(0,0,0,0);
-    //} else {
-    //  fragmentColor = vec4(s,s,s,s) * vec4(color,1);
-    //}
-    fragmentColor = vec4(s,s,s,s) * vec4(color,1);
-    fragmentColor = vec4(color,1);
+    fragmentColor = vec4(1,1,1,0.1);
+    fragmentColor = vec4(1,1,1,opacity);
   }
   """
 
@@ -705,7 +680,7 @@ lorenzComputeSrc =
   void main() {
     uint i = gl_GlobalInvocationID.x;
     if (i >= N) return;
-    float dt=0.001;
+    float dt=0.004;
     vec3 x = inPos[i].xyz;
     vec3 k1 = f(x);
     vec3 k2 = f(x + 0.5*dt*k1);
@@ -716,6 +691,61 @@ lorenzComputeSrc =
   }
   """
 
+-- aizawaComputeSrc =
+--   """#version 430\r\n
+--   layout(local_size_x=256) in;
+--   layout(std430,binding=0) buffer InPos {vec4 inPos[];};
+--   layout(std430,binding=1) buffer OutPos {vec4 outPos[];};
+--   uniform uint N;
+--   void main() {
+--     uint i = gl_GlobalInvocationID.x;
+--     if (i >= N) return;
+--     float dt=0.004;
+--     float a=0.95;float b=0.7;float c=0.6;float d=3.5;float e=0.25; float f=0.1;
+--     vec3 pos = inPos[i].xyz;
+--     float x=pos.x; float y = pos.y; float z = pos.z;
+--     vec3 xNext = pos + dt * vec3(-x-y,x+a*y,b+z*(x-c));
+--     outPos[i] = vec4(xNext, 1.0);
+--   }
+--   """
+
+aizawaComputeSrc =
+  """#version 430
+  layout(local_size_x = 256) in;
+
+  layout(std430, binding = 0) buffer InPos  { vec4 inPos[];  };
+  layout(std430, binding = 1) buffer OutPos { vec4 outPos[]; };
+
+  uniform uint  N;
+
+  vec3 F(vec3 X) {
+    float a=0.95;float b=0.7;float c=0.6; float d=3.5; float e=0.25; float f_=0.1;
+    float x = X.x, y = X.y, z = X.z;
+    float r2 = x*x + y*y;
+    return vec3(
+      (z - b) * x - d * y,
+      d * x + (z - b) * y,
+      c + a*z - (z*z*z)/3.0 - r2 * (1.0 + e*z) + f_ * z * x*x*x
+    );
+  }
+
+  void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= N) return;
+
+    float dt=0.004;
+
+    vec3 x = inPos[i].xyz;
+
+    vec3 k1 = F(x);
+    vec3 k2 = F(x + 0.5*dt*k1);
+    vec3 k3 = F(x + 0.5*dt*k2);
+    vec3 k4 = F(x + dt*k3);
+
+    vec3 xNext = x + (dt/6.0)*(k1 + 2.0*k2 + 2.0*k3 + k4);
+    outPos[i] = vec4(xNext, 1.0);
+  }
+  """
 
 --- BASIC POSITION SHADER ------------------------------------------------------
 
@@ -804,10 +834,10 @@ initialAppState = AppState
         { timeToQuit = False
         , windowWidth = 800
         , windowHeight = 600
-        , viewDirection = maybe 1 west . strengthen
+        , viewDirection = v4 0.98 (-0.15) (-0.11) 1
         , cameraYaw = 0
         , cameraPitch = 0
-        , cameraPosition = v4 0 0 0 1
+        , cameraPosition = v4 12.5 2.2 12.3 1
         }
 
 handleEvent event appState = case SDL.eventPayload event of
@@ -906,6 +936,7 @@ main = do
         pure programID
 
   lorenzComputeShader <- initComputeShader lorenzComputeSrc
+  aizawaComputeShader <- initComputeShader aizawaComputeSrc
 
 
   let initShader vertexShaderCode fragmentShaderCode = do
@@ -975,17 +1006,6 @@ main = do
   cubeMetadata <- initializeObject cubeObj
   pyramidMetadata <- initializeObject pyramidObj
   planeMetadata <- initializeObject planeObj
-
-  pointCloudMetadata <- do
-    let numPoints = 100000 :: Int
-    let randVec = v3 <$> System.Random.randomIO <*> System.Random.randomIO <*> System.Random.randomIO
-    vertices <- sequenceA (replicate numPoints (do
-      x <- randVec
-      -- y <- randVec
-      let y = v3 1 1 1
-      z <- randVec
-      pure ((2 * x) :& y :& (normalize (z - v3 0.5 0.5 0.5)))))
-    genBuffer [0..numPoints] vertices
 
   teapotMetadata <- do
     let filename = "resources/teapot.obj"
@@ -1101,13 +1121,34 @@ main = do
     Foreign.peek ssboBPtr
   GL.glNamedBufferStorage ssboB initialPositionsSize Foreign.nullPtr 0
 
+
+  let pointGrid = do
+        let dim = 50
+        let axis = fromIntegral <$> [-dim..dim]
+        x <- axis
+        y <- axis
+        z <- axis
+        pure (v4 x y z 1)
+
+  ssboAAizawa <- Foreign.alloca $ \ssboAPtr -> do
+    GL.glCreateBuffers 1 ssboAPtr
+    Foreign.peek ssboAPtr
+  let initialPositionsAizawa = (*v4 0.1 0.1 0.1 1) <$> pointGrid
+  let initialPositionsSizeAizawa = fromIntegral (size @(Vec 4) * length initialPositionsAizawa)
+  Foreign.withArray initialPositionsAizawa (\ptr -> GL.glNamedBufferStorage ssboAAizawa initialPositionsSizeAizawa ptr 0)
+  ssboBAizawa <- Foreign.alloca $ \ssboBPtr -> do
+    GL.glCreateBuffers 1 ssboBPtr
+    Foreign.peek ssboBPtr
+  GL.glNamedBufferStorage ssboBAizawa initialPositionsSizeAizawa Foreign.nullPtr 0
+
+
   emptyVao <- Foreign.alloca $ \ptr -> do
     GL.glCreateVertexArrays 1 ptr
     Foreign.peek ptr
 
   --- MAIN LOOP ----------------------------------------------------------------
   
-  let loop prevAppState animState theta bufferFlipFlop = do
+  let loop prevAppState animState inBuf outBuf inBufAizawa outBufAizawa = do
 
 
         --- HANDLE EVENTS ------------------------------------------------------
@@ -1129,8 +1170,6 @@ main = do
 
         --- COMPUTE SHADER -----------------------------------------------------
 
-        let inBuf = if bufferFlipFlop then ssboA else ssboB
-        let outBuf = if bufferFlipFlop then ssboB else ssboA
         GL.glUseProgram lorenzComputeShader
         uniformLoc <- Foreign.C.String.withCString "N" (GL.glGetUniformLocation lorenzComputeShader)
         GL.glUniform1ui uniformLoc (fromIntegral (length initialPositions))
@@ -1154,61 +1193,29 @@ main = do
         GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 1 outBuf
         GL.glDispatchCompute ((fromIntegral (length initialPositions) + 255) `div` 256) 1 1
         GL.glMemoryBarrier GL.GL_SHADER_STORAGE_BARRIER_BIT
-        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 0 outBuf
-        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 1 inBuf
-        GL.glDispatchCompute ((fromIntegral (length initialPositions) + 255) `div` 256) 1 1
+
+        GL.glUseProgram aizawaComputeShader
+        uniformLoc <- Foreign.C.String.withCString "N" (GL.glGetUniformLocation aizawaComputeShader)
+        GL.glUniform1ui uniformLoc (fromIntegral (length initialPositionsAizawa))
+        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 0 inBufAizawa
+        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 1 outBufAizawa
+        GL.glDispatchCompute ((fromIntegral (length initialPositionsAizawa) + 255) `div` 256) 1 1
         GL.glMemoryBarrier GL.GL_SHADER_STORAGE_BARRIER_BIT
-        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 0 inBuf
-        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 1 outBuf
-        GL.glDispatchCompute ((fromIntegral (length initialPositions) + 255) `div` 256) 1 1
+        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 0 outBufAizawa
+        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 1 inBufAizawa
+        GL.glDispatchCompute ((fromIntegral (length initialPositionsAizawa) + 255) `div` 256) 1 1
         GL.glMemoryBarrier GL.GL_SHADER_STORAGE_BARRIER_BIT
-        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 0 outBuf
-        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 1 inBuf
-        GL.glDispatchCompute ((fromIntegral (length initialPositions) + 255) `div` 256) 1 1
+        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 0 inBufAizawa
+        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 1 outBufAizawa
+        GL.glDispatchCompute ((fromIntegral (length initialPositionsAizawa) + 255) `div` 256) 1 1
         GL.glMemoryBarrier GL.GL_SHADER_STORAGE_BARRIER_BIT
-        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 0 inBuf
-        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 1 outBuf
-        GL.glDispatchCompute ((fromIntegral (length initialPositions) + 255) `div` 256) 1 1
+        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 0 outBufAizawa
+        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 1 inBufAizawa
+        GL.glDispatchCompute ((fromIntegral (length initialPositionsAizawa) + 255) `div` 256) 1 1
         GL.glMemoryBarrier GL.GL_SHADER_STORAGE_BARRIER_BIT
-        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 0 outBuf
-        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 1 inBuf
-        GL.glDispatchCompute ((fromIntegral (length initialPositions) + 255) `div` 256) 1 1
-        GL.glMemoryBarrier GL.GL_SHADER_STORAGE_BARRIER_BIT
-        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 0 inBuf
-        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 1 outBuf
-        GL.glDispatchCompute ((fromIntegral (length initialPositions) + 255) `div` 256) 1 1
-        GL.glMemoryBarrier GL.GL_SHADER_STORAGE_BARRIER_BIT
-        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 0 outBuf
-        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 1 inBuf
-        GL.glDispatchCompute ((fromIntegral (length initialPositions) + 255) `div` 256) 1 1
-        GL.glMemoryBarrier GL.GL_SHADER_STORAGE_BARRIER_BIT
-        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 0 inBuf
-        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 1 outBuf
-        GL.glDispatchCompute ((fromIntegral (length initialPositions) + 255) `div` 256) 1 1
-        GL.glMemoryBarrier GL.GL_SHADER_STORAGE_BARRIER_BIT
-        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 0 outBuf
-        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 1 inBuf
-        GL.glDispatchCompute ((fromIntegral (length initialPositions) + 255) `div` 256) 1 1
-        GL.glMemoryBarrier GL.GL_SHADER_STORAGE_BARRIER_BIT
-        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 0 inBuf
-        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 1 outBuf
-        GL.glDispatchCompute ((fromIntegral (length initialPositions) + 255) `div` 256) 1 1
-        GL.glMemoryBarrier GL.GL_SHADER_STORAGE_BARRIER_BIT
-        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 0 outBuf
-        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 1 inBuf
-        GL.glDispatchCompute ((fromIntegral (length initialPositions) + 255) `div` 256) 1 1
-        GL.glMemoryBarrier GL.GL_SHADER_STORAGE_BARRIER_BIT
-        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 0 inBuf
-        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 1 outBuf
-        GL.glDispatchCompute ((fromIntegral (length initialPositions) + 255) `div` 256) 1 1
-        GL.glMemoryBarrier GL.GL_SHADER_STORAGE_BARRIER_BIT
-        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 0 outBuf
-        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 1 inBuf
-        GL.glDispatchCompute ((fromIntegral (length initialPositions) + 255) `div` 256) 1 1
-        GL.glMemoryBarrier GL.GL_SHADER_STORAGE_BARRIER_BIT
-        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 0 inBuf
-        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 1 outBuf
-        GL.glDispatchCompute ((fromIntegral (length initialPositions) + 255) `div` 256) 1 1
+        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 0 inBufAizawa
+        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 1 outBufAizawa
+        GL.glDispatchCompute ((fromIntegral (length initialPositionsAizawa) + 255) `div` 256) 1 1
         GL.glMemoryBarrier GL.GL_SHADER_STORAGE_BARRIER_BIT
 
         --- DRAW ---------------------------------------------------------------
@@ -1239,26 +1246,6 @@ main = do
         drawTriangulation basicShader planeMetadata (translate (2*down + 4*west))
         drawTriangulation basicShader teapotMetadata (translate (3*north + up + 8*west))
 
-
-        GL.glEnable GL.GL_BLEND
-        GL.glBlendFunc GL.GL_SRC_ALPHA GL.GL_ONE_MINUS_SRC_ALPHA
-        GL.glDepthMask GL.GL_FALSE
-        GL.glEnable GL.GL_PROGRAM_POINT_SIZE
-        GL.glUseProgram sparkleShader
-        -- let pointCloudTransform = translate (west + north*8 + up*2) . rotateAround (v3 1 1 1) theta . (*0.01)
-        let pointCloudTransform = translate (west + north*8 + up*2) . (*(v4 0.1 0.1 0.1 1))
-        -- GL.glBindVertexArray (vertexArrayID pointCloudMetadata)
-        GL.glBindVertexArray emptyVao
-        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 1 outBuf
-        setShaderUniform sparkleShader "lightPosition" lightPosition
-        setShaderUniform sparkleShader "eyePosition" (cameraPosition appState . weaken)
-        setShaderUniform sparkleShader "specularity" (1024 :: Int)
-        setShaderUniform sparkleShader "modelToWorldTransformMatrix" pointCloudTransform
-        setShaderUniform sparkleShader "modelToProjectionMatrix" (toScreenspace pointCloudTransform)
-        GL.glDrawArrays GL.GL_POINTS 0 (fromIntegral $ length initialPositions)
-        GL.glDepthMask GL.GL_TRUE
-        GL.glDisable GL.GL_BLEND
-        -- GL.glDisable GL.GL_DEPTH_TEST
 
         let zigTransform = translate (2*south + 2*down + west) . rotateAround up 45 . rotateAround south 90
 
@@ -1297,10 +1284,40 @@ main = do
         setShaderUniform skellyShader "modelToProjectionMatrix" (toScreenspace zigTransform)
         -- GL.glDrawElements GL.GL_LINES (indexCount skelly) GL.GL_UNSIGNED_SHORT Foreign.nullPtr
 
+        -- print (cameraPosition appState)
+        -- print (viewDirection appState)
 
-        unless (timeToQuit appState) (loop appState (tail animState) (theta + 0.1) (not bufferFlipFlop))
+        GL.glEnable GL.GL_BLEND
+        GL.glBlendFunc GL.GL_SRC_ALPHA GL.GL_ONE_MINUS_SRC_ALPHA
+        GL.glDepthMask GL.GL_FALSE
+        GL.glEnable GL.GL_PROGRAM_POINT_SIZE
+        GL.glUseProgram sparkleShader
+        let pointCloudTransform = translate (5*west + north*14 + up*2) . (*v4 0.1 0.1 0.1 1)
+        GL.glBindVertexArray emptyVao
+        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 1 outBuf
+        setShaderUniform sparkleShader "modelToProjectionMatrix" (toScreenspace pointCloudTransform)
+        GL.glDrawArrays GL.GL_POINTS 0 (fromIntegral $ length initialPositions)
+        GL.glDepthMask GL.GL_TRUE
+        GL.glDisable GL.GL_BLEND
+        -- GL.glDisable GL.GL_DEPTH_TEST
 
-  loop initialAppState (cycle (skeleton ziganim)) 0 True
+        GL.glEnable GL.GL_BLEND
+        GL.glBlendFunc GL.GL_SRC_ALPHA GL.GL_ONE_MINUS_SRC_ALPHA
+        GL.glDepthMask GL.GL_FALSE
+        GL.glEnable GL.GL_PROGRAM_POINT_SIZE
+        GL.glUseProgram sparkleShader
+        let pointCloudTransform = translate (12*east + north*14 + up*2) . (*v4 0.4 0.4 0.4 1)
+        GL.glBindVertexArray emptyVao
+        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 1 outBufAizawa
+        setShaderUniform sparkleShader "modelToProjectionMatrix" (toScreenspace pointCloudTransform)
+        GL.glDrawArrays GL.GL_POINTS 0 (fromIntegral $ length initialPositionsAizawa)
+        GL.glDepthMask GL.GL_TRUE
+        GL.glDisable GL.GL_BLEND
+        -- GL.glDisable GL.GL_DEPTH_TEST
+
+        unless (timeToQuit appState) (loop appState (tail animState) outBuf inBuf outBufAizawa inBufAizawa)
+
+  loop initialAppState (cycle (skeleton ziganim)) ssboA ssboB ssboAAizawa ssboBAizawa
 
 
   --- CLEANUP ------------------------------------------------------------------
