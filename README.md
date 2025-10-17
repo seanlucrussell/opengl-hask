@@ -7,6 +7,107 @@ and an output type, similarly characterized
 i also understand that some shaders have certain parameters built in. inputs and outputs might be implicit
 
 
+maybe each component should really have the three init-render-teardown loops? maybe their own app state management? for the most part it seems like the different components are basically completely orthogonal to each other
+
+tbh it is nice to have access to the main environment to share things. maybe this init-render-teardown thing should be defined in the main function so everyone has access to shared resources like shaders
+
+
+moving initialAppState struct to near the end of the file. feels a bit weird cuz it comes logically before main but is defined lexically after. but this keeps the definition close to the initializer, and any time we extend/modify the app state struct we must at a minimum modify the initializer so it makes sense to me to group all this together
+
+
+idea: we need names to pass into shaders. what about a shader builder function designed using CPS w/ something like the signature `shaderArg :: ArgName -> Continuation -> Src -> Shader `. then can make this mostly variadic? close over it w/ standard methods?
+
+
+
+
+super common pattern im noticing: `foreign.alloca thing (\ptr -> do {f ptr; Foreign.peek ptr})` basically need op of type `(Ptr a -> IO b) -> IO a`. could also have an array variant for `(Ptr a -> IO b) -> IO [a]`
+
+
+
+
+
+
+sphere generation: a good sphere generation from n points (or n faces) would satisfy the following criteria as well as possible:
+
+- triangle edges are uniform in size
+- triangle areas are uniform in size
+- triangle vertices are on the sphere
+- the average deviation of a triangle from the spheres surface is minimized
+- triangles are as close to equilateral as possible
+
+GAH another opportunity to use autograd to make something simple! just need to implement it!
+
+
+
+general data structure we should have: triangulation! polymorphic over vertex data, has triangular faces. same for networks. generalize Obj format. should also have systems in place for generating extra data using almost a database? like color by faces, or by edges, or whatever. like our elementary objects should mostly be position/face data that we can augment w/ special functions. should we not reuse vertices for this? i think most basic objects should not reuse vertices. potential perf issues down the line if we are rendering a LOT of basic objects. but lets not worry about that!
+
+
+
+
+really should build a shader struct
+
+
+btw why am i doing affine things? i feel like most of my internal logic would be simpler if i operated directly over 3d values and maybe possibly converted to affine at the end
+
+
+mouse click behavior: interaction is accepted if starts and ends on the target. iow we only fire two events. might be nice to build a full history of events tbh? we really only need to check things on mouse up, then consult w/ mouse down history. anyhow probably easier to do it statefully rn
+
+
+
+
+main constraints:
+
+we can upload data to a buffer. the data that gets uploaded consists of some vertex set. there is some amount of data per vertex. we need to attribute data properly. ALSO. we need to upload triangle/line/point indices. with the added constraint that each index must be a valid index into the vertex set. out of bounds errors are a problem. IN ADDITION each model MUST be either a triangulation OR a set of lines. there is no general way to swap between the two. iow render mode is tightly coupled to this buffer
+
+shaders must match the shape of the vertex data. different shader programs can work on the same buffers, but their input interfaces must match. it may be permissible to have the same input interfaces but different uniforms. iow the shape of the uniforms are decoupled from the shape of the object buffers. same goes for textures, tho presumably textures are downstream of object buffers.
+
+short summary:
+- object indices must be valid
+- object vertex attributes must match shader inputs
+- shader uniforms must be provided before execution
+
+
+each time we swap shaders, we need to set up uniforms. probably the right api is to do the shader swap in a type-safe way, but NOT make it fully functional. maybe ideally we'd have per-program invocation do something like FRP where it checks if the supplied arguments change the state of the shader uniforms. but better to do something like initializing the shader. actually maybe what we need is a set of initialization tokens or something? linear types to guarantee shader initialization?
+
+
+okay so triangle/line is a property of the indices and vertex attributes are a property of the vertices. so a buffer data object is something along the lines of
+
+Buffer index vertex = [index] [vertex] 
+  where index = (int,int) | (int,int,int)
+
+vertex can be whatever as long as it can be serialized.
+
+tho really the index and vertex types are kind of dummies after we load things into a buffer. used for compatability later on
+
+
+a lot of buffer things can probably be seen as high dimensional arrays ya know? like the index buffer is a 3xNxGLuint size array of bits
+
+
+seems like for uploading uniforms, we could link specific shapes to specific uniform functions. eg we can specify `setUniform loc v = Foreign.withArray (flatten v) (<whatever function the shape of v matches> loc 1)` or something like that
+
+
+
+for linear types, i can't help but think it would be nice to have a massive opengl state object that we could modify pieces of
+
+
+
+i don't think this is quite right, might need some stuff for textures and for other things, but the draw calls we are using are very nearly this:
+
+draw :: (Vertex v, Uniform u, DrawMode d) => Buffer v d -> Shader v u -> u -> IO ()
+
+
+think it is a good idea to keep all the alignment enum stuff grouped together. don't inline. at least not the stuff that explicitly switches on the enum cases. keep that all in one place for easy management
+
+
+GL_POINTS is actually kind of nice for rendering tbh.
+
+
+
+once again thinking that a constructor for vertices like :& might be super duper useful. if we just have a type class for each base type (pretty much just storable instances for Array n s) we can probably derive the rest programmatically. like the instance is something like
+
+(Attribute a, Storable b) => Storable (a :& b)
+
+or some such
 
 
 concept: standard basis vectors for simple arithmetic to define vector literals

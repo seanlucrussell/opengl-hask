@@ -1,9 +1,10 @@
-{-# LANGUAGE OverloadedStrings,LinearTypes,ScopedTypeVariables,MultilineStrings,DataKinds,TypeOperators,FlexibleInstances,UndecidableInstances,TypeApplications,AllowAmbiguousTypes,GADTs,TypeFamilies #-}
+{-# LANGUAGE OverloadedStrings,LinearTypes,ScopedTypeVariables,MultilineStrings,DataKinds,TypeOperators,FlexibleInstances,UndecidableInstances,TypeApplications,AllowAmbiguousTypes,GADTs,TypeFamilies,RankNTypes #-}
 module Main where
 import           Control.Applicative
 import           Control.Monad (unless,when)
 import           Data.Finite
 import           GHC.TypeNats
+import qualified System.Process
 import qualified Codec.Picture
 import qualified Control.Monad (void)
 import qualified Data.Array
@@ -130,6 +131,9 @@ worldToViewMatrix position viewDirection = lookAt position (position + viewDirec
 memo :: forall a. KnownNat a => Vec a -> Vec a
 memo v = (Data.Array.!) (Data.Array.listArray (0, fromIntegral (maxBound :: Finite a)) (map v finites)) . fromIntegral
 
+project :: KnownNat n => Vec n -> Vec n -> Vec n
+project a b = pure ((a `dot` b) / magnitude b) * b 
+
 
 north :: Vec 3 = v3 1 0 0
 south :: Vec 3 = v3 (-1) 0 0
@@ -188,30 +192,30 @@ normalModel obj = do
 
 cubeObj = Obj
   { vertices =
-    [ OBJ_Vertex {position = v3 (-1) ( 1) ( 1), color = v3 1 0.0 0.0}
-    , OBJ_Vertex {position = v3 ( 1) ( 1) ( 1), color = v3 0 1.0 0.0}
-    , OBJ_Vertex {position = v3 ( 1) ( 1) (-1), color = v3 0 0.0 1.0}
-    , OBJ_Vertex {position = v3 (-1) ( 1) (-1), color = v3 1 1.0 1.0}
-    , OBJ_Vertex {position = v3 (-1) ( 1) (-1), color = v3 1 0.0 1.0}
-    , OBJ_Vertex {position = v3 ( 1) ( 1) (-1), color = v3 0 0.5 0.2}
-    , OBJ_Vertex {position = v3 ( 1) (-1) (-1), color = v3 0 0.6 0.4}
+    [ OBJ_Vertex {position = v3 (-1)   1    1 , color = v3 1 0.0 0.0}
+    , OBJ_Vertex {position = v3   1    1    1 , color = v3 0 1.0 0.0}
+    , OBJ_Vertex {position = v3   1    1  (-1), color = v3 0 0.0 1.0}
+    , OBJ_Vertex {position = v3 (-1)   1  (-1), color = v3 1 1.0 1.0}
+    , OBJ_Vertex {position = v3 (-1)   1  (-1), color = v3 1 0.0 1.0}
+    , OBJ_Vertex {position = v3   1    1  (-1), color = v3 0 0.5 0.2}
+    , OBJ_Vertex {position = v3   1  (-1) (-1), color = v3 0 0.6 0.4}
     , OBJ_Vertex {position = v3 (-1) (-1) (-1), color = v3 0 1.0 0.5}
-    , OBJ_Vertex {position = v3 ( 1) ( 1) (-1), color = v3 0 0.5 0.2}
-    , OBJ_Vertex {position = v3 ( 1) ( 1) ( 1), color = v3 0 0.3 0.7}
-    , OBJ_Vertex {position = v3 ( 1) (-1) ( 1), color = v3 0 0.7 1.0}
-    , OBJ_Vertex {position = v3 ( 1) (-1) (-1), color = v3 0 0.7 0.5}
-    , OBJ_Vertex {position = v3 (-1) ( 1) ( 1), color = v3 0 0.8 0.2}
-    , OBJ_Vertex {position = v3 (-1) ( 1) (-1), color = v3 0 0.7 0.3}
+    , OBJ_Vertex {position = v3   1    1  (-1), color = v3 0 0.5 0.2}
+    , OBJ_Vertex {position = v3   1    1    1 , color = v3 0 0.3 0.7}
+    , OBJ_Vertex {position = v3   1  (-1)   1 , color = v3 0 0.7 1.0}
+    , OBJ_Vertex {position = v3   1  (-1) (-1), color = v3 0 0.7 0.5}
+    , OBJ_Vertex {position = v3 (-1)   1    1 , color = v3 0 0.8 0.2}
+    , OBJ_Vertex {position = v3 (-1)   1  (-1), color = v3 0 0.7 0.3}
     , OBJ_Vertex {position = v3 (-1) (-1) (-1), color = v3 0 0.7 0.7}
-    , OBJ_Vertex {position = v3 (-1) (-1) ( 1), color = v3 0 0.5 1.0}
-    , OBJ_Vertex {position = v3 ( 1) ( 1) ( 1), color = v3 0 1.0 0.7}
-    , OBJ_Vertex {position = v3 (-1) ( 1) ( 1), color = v3 0 0.4 0.8}
-    , OBJ_Vertex {position = v3 (-1) (-1) ( 1), color = v3 0 0.8 0.7}
-    , OBJ_Vertex {position = v3 ( 1) (-1) ( 1), color = v3 0 0.7 1.0}
-    , OBJ_Vertex {position = v3 ( 1) (-1) (-1), color = v3 0 0.3 0.7}
+    , OBJ_Vertex {position = v3 (-1) (-1)   1 , color = v3 0 0.5 1.0}
+    , OBJ_Vertex {position = v3   1    1    1 , color = v3 0 1.0 0.7}
+    , OBJ_Vertex {position = v3 (-1)   1    1 , color = v3 0 0.4 0.8}
+    , OBJ_Vertex {position = v3 (-1) (-1)   1 , color = v3 0 0.8 0.7}
+    , OBJ_Vertex {position = v3   1  (-1)   1 , color = v3 0 0.7 1.0}
+    , OBJ_Vertex {position = v3   1  (-1) (-1), color = v3 0 0.3 0.7}
     , OBJ_Vertex {position = v3 (-1) (-1) (-1), color = v3 0 0.9 0.5}
-    , OBJ_Vertex {position = v3 (-1) (-1) ( 1), color = v3 0 0.8 0.5}
-    , OBJ_Vertex {position = v3 ( 1) (-1) ( 1), color = v3 0 1.0 0.2}
+    , OBJ_Vertex {position = v3 (-1) (-1)   1 , color = v3 0 0.8 0.5}
+    , OBJ_Vertex {position = v3   1  (-1)   1 , color = v3 0 1.0 0.2}
     ]
   , faces =
       [ (0,   1,  2), ( 0,  2,  3) -- Top
@@ -268,6 +272,48 @@ planeObj =
       squareIndices (i*planeWidth+j) (i*planeWidth+j+1) ((i+1)*planeWidth+j) ((i+1)*planeWidth+j+1)
   }
 
+icosahedron =
+ let phi = (1 + sqrt 5) / 2
+     a = 1
+     b = 1/phi
+ in Obj
+  { vertices =
+    [ OBJ_Vertex {position = v3 0 b (-a), color = v3 1 1 1}
+    , OBJ_Vertex {position = v3 b a 0, color = v3 1 1 1}
+    , OBJ_Vertex {position = v3 (-b) a 0, color = v3 1 1 1}
+    , OBJ_Vertex {position = v3 0 b a, color = v3 1 1 1}
+    , OBJ_Vertex {position = v3 0 (-b) a, color = v3 1 1 1}
+    , OBJ_Vertex {position = v3 (-a) 0 b, color = v3 1 1 1}
+    , OBJ_Vertex {position = v3 0 (-b) (-a), color = v3 1 1 1}
+    , OBJ_Vertex {position = v3 a 0 (-b), color = v3 1 1 1}
+    , OBJ_Vertex {position = v3 a 0 b, color = v3 1 1 1}
+    , OBJ_Vertex {position = v3 (-a) 0 (-b), color = v3 1 1 1}
+    , OBJ_Vertex {position = v3 b (-a) 0, color = v3 1 1 1}
+    , OBJ_Vertex {position = v3 (-b) (-a) 0, color = v3 1 1 1}
+    ]
+  , faces = fmap (\(a,b,c) -> (a-1,b-1,c-1))
+    [ (3, 2, 1)
+    , (2, 3, 4)
+    , (6, 5, 4)
+    , (5, 9, 4)
+    , (8, 7, 1)
+    , (7, 10, 1)
+    , (12, 11, 5)
+    , (11, 12, 7)
+    , (10, 6, 3)
+    , (6, 10, 12)
+    , (9, 8, 2)
+    , (8, 9, 11)
+    , (3, 6, 4)
+    , (9, 2, 4)
+    , (10, 3, 1)
+    , (2, 8, 1)
+    , (12, 10, 7)
+    , (8, 11, 7)
+    , (6, 12, 5)
+    , (11, 9, 5)
+    ]
+  }
 
 --- SMD PARSER -----------------------------------------------------------------
 
@@ -458,6 +504,11 @@ smdToTexturedSkeletonVertex v =
 
 --- VERTEX/ATTRIBUTE TYPES -----------------------------------------------------
 
+size :: forall a.Foreign.Storable a => Int
+size = Foreign.sizeOf (undefined :: a)
+alignment :: forall a.Foreign.Storable a => Int
+alignment = Foreign.alignment (undefined :: a)
+
 roundUp :: Int -> Int -> Int
 roundUp val base = (val + base - 1) `div` base * base
 
@@ -502,7 +553,6 @@ instance {-# OVERLAPPING #-} (Foreign.Storable b, Vertex a, Vertex b) => Vertex 
 
 configureAttributes :: forall v.(Foreign.Storable v, Vertex v) => IO ()
 configureAttributes = configureAttributesOpen @v (fromIntegral (size @v)) 0 Foreign.nullPtr (\_ _ -> pure ())
-
 
 
 --- GENERATE BUFFERS -----------------------------------------------------------
@@ -600,6 +650,7 @@ texturedSkeletonFragmentSrc =
   }
   """
 
+
 --- COLORED NORMAL SHADER ------------------------------------------------------
 
 type ColoredNormalVertex = Vec 3 :& Vec 3 :& Vec 3
@@ -642,6 +693,27 @@ coloredNormalFragmentSrc =
     vec4 specularLight = vec4(s,s,s,s);
     vec4 lighting = clamp(diffuseLight,0.0,1.0) + ambientLight + clamp(specularLight,0,1);
     fragmentColor = lighting * vec4(color,1);
+  }
+  """
+
+--- UNIFORM COLOR SHADER -------------------------------------------------------
+
+
+uniformColorVertexSrc =
+  """#version 430\r\n
+  uniform mat4 modelToProjectionMatrix;
+  in layout(location=0) vec4 vertexPositionModelSpace;
+  void main() {
+    gl_Position = modelToProjectionMatrix * vertexPositionModelSpace;
+  }
+  """
+
+uniformColorFragmentSrc =
+  """#version 430\r\n
+  uniform vec4 color;
+  out vec4 fragmentColor;
+  void main() {
+    fragmentColor = color;
   }
   """
 
@@ -755,7 +827,6 @@ positionFragmentSrc =
   """
 
 
-
 --- PICTURE FRAME SHADER -------------------------------------------------------
 
 type PictureVertex = Vec 4
@@ -790,41 +861,13 @@ pictureFragmentSrc =
   """
 
 
-
 --- MAIN GRAPHICS PROGRAM ------------------------------------------------------
 
-size :: forall a.Foreign.Storable a => Int
-size = Foreign.sizeOf (undefined :: a)
-alignment :: forall a.Foreign.Storable a => Int
-alignment = Foreign.alignment (undefined :: a)
-
-bufferSize :: forall a n.(Foreign.Storable a, Num n) => [a] -> n
-bufferSize = fromIntegral . (*) (size @a) . length
-
-data AppState = AppState
-  { timeToQuit :: Bool
-  , windowWidth :: Int
-  , windowHeight :: Int
-  , viewDirection :: Vec 4
-  , cameraPitch :: Float
-  , cameraYaw :: Float
-  , cameraPosition :: Vec 4
-  }
-
 affineTo3d :: Vec 4 -> Vec 3
-affineTo3d v = v . weaken
+affineTo3d v = v . weaken / pure (v 3)
 
 moveSpeed = 0.1
-
-initialAppState = AppState
-        { timeToQuit = False
-        , windowWidth = 800
-        , windowHeight = 600
-        , viewDirection = v4 0.98 (-0.15) (-0.11) 1
-        , cameraYaw = 0
-        , cameraPitch = 0
-        , cameraPosition = v4 12.5 2.2 12.3 1
-        }
+cameraSpeed = 1/3
 
 toDegrees = (*(180/pi))
 toRadians = (*(pi/180))
@@ -838,13 +881,19 @@ handleEvent event appState = case SDL.eventPayload event of
     SDL.KeycodeQ -> appState { timeToQuit = timeToQuit appState || (SDL.keyboardEventKeyMotion e==SDL.Pressed)}
     _ -> appState
   SDL.MouseMotionEvent mme ->
-    let SDL.V2 x y = SDL.mouseMotionEventRelMotion mme
+    let SDL.V2 x y = SDL.mouseMotionEventRelMotion mme -- xy coords are inverted
         limit = 89.999
-        cameraSpeed = 1/3
     in appState
         { cameraYaw = cameraYaw appState - cameraSpeed * fromIntegral x
-        , cameraPitch = cameraPitch appState + clamp (-limit - cameraPitch appState) (limit - cameraPitch appState) (-(cameraSpeed * fromIntegral y))
+        , cameraPitch = clamp (-limit) limit (cameraPitch appState - (cameraSpeed * fromIntegral y))
         }
+  SDL.MouseButtonEvent mbe ->
+    appState { buttonDown =
+       if SDL.mouseButtonEventButton mbe == SDL.ButtonLeft
+       then case SDL.mouseButtonEventMotion mbe of
+         SDL.Released -> False
+         SDL.Pressed -> True
+       else buttonDown appState}
   _ -> appState
 
 moveCamera direction appState =
@@ -920,7 +969,6 @@ main = do
         buildShader GL.GL_FRAGMENT_SHADER fragmentShaderCode programID
         linkShader programID
 
-
   lorenzComputeShader <- initComputeShader lorenzComputeSrc
   aizawaComputeShader <- initComputeShader aizawaComputeSrc
 
@@ -929,16 +977,17 @@ main = do
   textureShader <- initShader texturedSkeletonVertexSrc texturedSkeletonFragmentSrc
   skellyShader <- initShader positionVertexSrc positionFragmentSrc
   pictureShader <- initShader pictureVertexSrc pictureFragmentSrc
-
+  uniformColorShader <- initShader uniformColorVertexSrc uniformColorFragmentSrc
 
   --- LOAD OBJECTS -------------------------------------------------------------
 
-
-  let initializeObject obj = genBuffer (faces obj) (zipWith (\v n -> position v :& color v :& n) (vertices obj) (normals obj))
+  let initializeObject obj =
+        genBuffer (faces obj) (zipWith (\v n -> position v :& color v :& n) (vertices obj) (normals obj))
   
   cubeMetadata <- initializeObject cubeObj
   pyramidMetadata <- initializeObject pyramidObj
   planeMetadata <- initializeObject planeObj
+  icosahedronMetadata <- initializeObject icosahedron
 
   teapotMetadata <- do
     let filename = "resources/teapot.obj"
@@ -1010,17 +1059,20 @@ main = do
 
   --- CONFIGURE COMPUTE SHADER -------------------------------------------------
   
-  ssboA <- Foreign.alloca $ \ssboAPtr -> do
-    GL.glCreateBuffers 1 ssboAPtr
-    Foreign.peek ssboAPtr
-  let initialPositions = [extend (fromIntegral s / 100000) 1 | s <- [1..100001]] :: [Vec 4]
-  let initialPositionsSize = fromIntegral (size @(Vec 4) * length initialPositions)
-  Foreign.withArray initialPositions (\ptr -> GL.glNamedBufferStorage ssboA initialPositionsSize ptr 0)
-  ssboB <- Foreign.alloca $ \ssboBPtr -> do
-    GL.glCreateBuffers 1 ssboBPtr
-    Foreign.peek ssboBPtr
-  GL.glNamedBufferStorage ssboB initialPositionsSize Foreign.nullPtr 0
-
+  let lorenzParticleCount = 100000
+  (lorenzParticleBufferA,lorenzParticleBufferB) <- do 
+      let lorenzInitialParticlePositions =
+             [extend (fromIntegral s / fromIntegral lorenzParticleCount) 1 | s <- [1..lorenzParticleCount+1]] :: [Vec 4]
+      let lorenzBufferSize = fromIntegral (size @(Vec 4) * lorenzParticleCount)
+      lorenzParticleBufferA <- Foreign.alloca $ \ssboAPtr -> do
+        GL.glCreateBuffers 1 ssboAPtr
+        Foreign.peek ssboAPtr
+      Foreign.withArray lorenzInitialParticlePositions (\ptr -> GL.glNamedBufferStorage lorenzParticleBufferA lorenzBufferSize ptr 0)
+      lorenzParticleBufferB <- Foreign.alloca $ \ssboBPtr -> do
+        GL.glCreateBuffers 1 ssboBPtr
+        Foreign.peek ssboBPtr
+      GL.glNamedBufferStorage lorenzParticleBufferB lorenzBufferSize Foreign.nullPtr 0
+      pure (lorenzParticleBufferA, lorenzParticleBufferB)
 
   let pointGrid = do
         let dim = 50
@@ -1041,18 +1093,18 @@ main = do
     Foreign.peek ssboBPtr
   GL.glNamedBufferStorage ssboBAizawa initialPositionsSizeAizawa Foreign.nullPtr 0
 
-
   emptyVao <- Foreign.alloca $ \ptr -> do
     GL.glCreateVertexArrays 1 ptr
     Foreign.peek ptr
 
   --- MAIN LOOP ----------------------------------------------------------------
   
-  let loop prevAppState (animState:remainingFrames) inBuf outBuf inBufAizawa outBufAizawa = do
-
+  let loop prevAppState = do
 
         --- HANDLE EVENTS ------------------------------------------------------
         
+        let (animState:remainingFrames) = animation prevAppState
+
         events <- SDL.pollEvents
         SDL.pollEvents -- set keystate
         ks <- SDL.getKeyboardState
@@ -1072,17 +1124,17 @@ main = do
 
         GL.glUseProgram lorenzComputeShader
         uniformLoc <- Foreign.C.String.withCString "N" (GL.glGetUniformLocation lorenzComputeShader)
-        GL.glUniform1ui uniformLoc (fromIntegral (length initialPositions))
-        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 0 inBuf
-        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 1 outBuf
-        GL.glDispatchCompute ((fromIntegral (length initialPositions) + 255) `div` 256) 1 1
+        GL.glUniform1ui uniformLoc (fromIntegral lorenzParticleCount)
+        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 0 (lorenzParticleBufferIn appState)
+        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 1 (lorenzParticleBufferOut appState)
+        GL.glDispatchCompute ((fromIntegral lorenzParticleCount + 255) `div` 256) 1 1
         GL.glMemoryBarrier GL.GL_SHADER_STORAGE_BARRIER_BIT
 
         GL.glUseProgram aizawaComputeShader
         uniformLoc <- Foreign.C.String.withCString "N" (GL.glGetUniformLocation aizawaComputeShader)
         GL.glUniform1ui uniformLoc (fromIntegral (length initialPositionsAizawa))
-        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 0 inBufAizawa
-        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 1 outBufAizawa
+        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 0 (aizawaParticleBufferIn appState)
+        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 1 (aizawaParticleBufferOut appState)
         GL.glDispatchCompute ((fromIntegral (length initialPositionsAizawa) + 255) `div` 256) 1 1
         GL.glMemoryBarrier GL.GL_SHADER_STORAGE_BARRIER_BIT
 
@@ -1115,6 +1167,41 @@ main = do
         drawTriangulation basicShader planeMetadata (translate (2*down + 4*west))
         drawTriangulation basicShader teapotMetadata (translate (3*north + up + 8*west))
 
+
+
+        let cameraViewDirection3 = affineTo3d cameraViewDirection
+        let cameraPosition3 = affineTo3d (cameraPosition appState) 
+
+        let hitboxCenter = 4 * up
+
+        let rayHit =
+             let positionMinusCamera = hitboxCenter - cameraPosition3
+             in 1 > magnitude (project positionMinusCamera cameraViewDirection3 - positionMinusCamera)
+
+        let color = case (lightOn appState, buttonDown appState, rayHit) of
+             (True,True,True) -> v4 0.3 0.9 0.3 1
+             (True,True,False) -> v4 0.1 0.7 0.1 1
+             (True,False,True) -> v4 0.2 0.8 0.2 1
+             (True,False,False) -> v4 0.1 0.7 0.1 1
+             (False,True,True) -> v4 0.9 0.3 0.3 1
+             (False,True,False) -> v4 0.7 0.1 0.1 1
+             (False,False,True) -> v4 0.8 0.1 0.1 1
+             (False,False,False) -> v4 0.7 0.1 0.1 1
+
+        let toggleLight = buttonDown prevAppState && not (buttonDown appState) && rayHit
+
+        when toggleLight $ do
+          let lightCommand =  if lightOn prevAppState then "off" else "on"
+          System.Process.spawnProcess "/home/endless/laboratory/simulacrum/set-light.py" [lightCommand]
+          putStrLn ("turning light " ++ lightCommand)
+          
+
+        
+        GL.glUseProgram uniformColorShader
+        GL.glBindVertexArray (vertexArrayID icosahedronMetadata)
+        setShaderUniform uniformColorShader "color" color
+        setShaderUniform uniformColorShader "modelToProjectionMatrix" (toScreenspace (translate hitboxCenter))
+        GL.glDrawElements GL.GL_TRIANGLES (indexCount icosahedronMetadata) GL.GL_UNSIGNED_SHORT Foreign.nullPtr
 
         let zigTransform = translate (2*south + 2*down + west) . rotateAround up 45 . rotateAround south 90
 
@@ -1160,9 +1247,9 @@ main = do
         GL.glUseProgram sparkleShader
         let pointCloudTransform = translate (5*west + north*14 + up*2) . (*v4 0.1 0.1 0.1 1)
         GL.glBindVertexArray emptyVao
-        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 1 outBuf
+        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 1 (lorenzParticleBufferOut appState)
         setShaderUniform sparkleShader "modelToProjectionMatrix" (toScreenspace pointCloudTransform)
-        GL.glDrawArrays GL.GL_POINTS 0 (fromIntegral $ length initialPositions)
+        GL.glDrawArrays GL.GL_POINTS 0 (fromIntegral lorenzParticleCount)
         GL.glDepthMask GL.GL_TRUE
         GL.glDisable GL.GL_BLEND
 
@@ -1173,15 +1260,39 @@ main = do
         GL.glUseProgram sparkleShader
         let pointCloudTransform = translate (12*east + north*14 + up*2) . (*v4 0.4 0.4 0.4 1)
         GL.glBindVertexArray emptyVao
-        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 1 outBufAizawa
+        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 1 (aizawaParticleBufferOut appState)
         setShaderUniform sparkleShader "modelToProjectionMatrix" (toScreenspace pointCloudTransform)
         GL.glDrawArrays GL.GL_POINTS 0 (fromIntegral $ length initialPositionsAizawa)
         GL.glDepthMask GL.GL_TRUE
         GL.glDisable GL.GL_BLEND
 
-        unless (timeToQuit appState) (loop appState remainingFrames outBuf inBuf outBufAizawa inBufAizawa)
+        unless (timeToQuit appState) (loop appState
+             { lorenzParticleBufferIn = lorenzParticleBufferOut appState
+             , lorenzParticleBufferOut = lorenzParticleBufferIn appState
+             , aizawaParticleBufferIn = aizawaParticleBufferOut appState
+             , aizawaParticleBufferOut = aizawaParticleBufferIn appState
+             , animation = remainingFrames
+             , lightOn = if toggleLight && rayHit then not (lightOn appState) else lightOn appState
+             })
 
-  loop initialAppState (cycle (skeleton ziganim)) ssboA ssboB ssboAAizawa ssboBAizawa
+  let initialAppState = AppState
+          { timeToQuit = False
+          , windowWidth = 800
+          , windowHeight = 600
+          , viewDirection = v4 0.98 (-0.15) (-0.11) 1
+          , cameraYaw = 0
+          , cameraPitch = 0
+          , cameraPosition = v4 12.5 2.2 12.3 1
+          , animation = cycle (skeleton ziganim)
+          , lorenzParticleBufferIn = lorenzParticleBufferA
+          , lorenzParticleBufferOut = lorenzParticleBufferB
+          , aizawaParticleBufferIn = ssboAAizawa
+          , aizawaParticleBufferOut = ssboBAizawa
+          , buttonDown = False
+          , lightOn = False
+          }
+
+  loop initialAppState
 
 
   --- CLEANUP ------------------------------------------------------------------
@@ -1189,3 +1300,21 @@ main = do
   GL.glUseProgram 0
   GL.glDeleteProgram basicShader
   SDL.destroyWindow window
+
+data AppState = AppState
+  { timeToQuit :: Bool
+  , windowWidth :: Int
+  , windowHeight :: Int
+  , viewDirection :: Vec 4
+  , cameraPitch :: Float
+  , cameraYaw :: Float
+  , cameraPosition :: Vec 4
+  , animation :: [SMDSkeletonFrame]
+  , lorenzParticleBufferIn :: GL.GLuint
+  , lorenzParticleBufferOut :: GL.GLuint
+  , aizawaParticleBufferIn :: GL.GLuint
+  , aizawaParticleBufferOut :: GL.GLuint
+  , buttonDown :: Bool
+  , lightOn :: Bool
+  }
+
