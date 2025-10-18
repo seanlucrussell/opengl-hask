@@ -24,6 +24,10 @@ import qualified System.Random
 import qualified Text.Megaparsec            as MP
 import qualified Text.Megaparsec.Char       as C
 import qualified Text.Megaparsec.Char.Lexer as L
+import qualified Network.HTTP.Simple
+import qualified Data.Aeson
+import qualified Control.Concurrent.Async
+import qualified Data.String
 
 
 --- LINEAR ALGEBRA LIBRARY -----------------------------------------------------
@@ -914,6 +918,7 @@ main = do
   SDL.glCreateContext window
   SDL.Raw.Event.setRelativeMouseMode True
 
+  homeAssistantAuthToken <- takeWhile (/='\n') <$> readFile "homeAssistantAuthToken"
 
   --- INITIALIZE OPENGL --------------------------------------------------------
 
@@ -1192,7 +1197,14 @@ main = do
 
         when toggleLight $ do
           let lightCommand =  if lightOn prevAppState then "off" else "on"
-          System.Process.spawnProcess "/home/endless/laboratory/simulacrum/set-light.py" [lightCommand]
+          -- System.Process.spawnProcess "/home/endless/laboratory/simulacrum/set-light.nu" [lightCommand]
+          -- let token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJhYzg3OGQ4NjQyOTE0MmEwYWY0ZWI5ZGMyODRjZmU0MCIsImlhdCI6MTc2MDc0ODYyNSwiZXhwIjoyMDc2MTA4NjI1fQ.icKT9894NC4FKtjo_ZZjv2bkh8i_vr1Hz8VHFlXpM_4"
+          let request =
+                Network.HTTP.Simple.setRequestMethod "POST"
+                $ Network.HTTP.Simple.setRequestBodyJSON (Data.Aeson.object ["entity_id" Data.Aeson..= ("light.l" :: String)])
+                $ Network.HTTP.Simple.setRequestHeader "Authorization" ["Bearer " <> Data.String.fromString homeAssistantAuthToken]
+                $ Data.String.fromString ("http://homeassistant.local:8123/api/services/light/turn_" ++ lightCommand)
+          Control.Concurrent.Async.async (Network.HTTP.Simple.httpNoBody request)
           putStrLn ("turning light " ++ lightCommand)
           
 
