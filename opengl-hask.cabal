@@ -45,5 +45,7 @@ executable opengl-hask
                       http-conduit,
                       async,
                       aeson,
+                      FontyFruity,
+                      Rasterific,
     hs-source-dirs:   app
     default-language: Haskell2010

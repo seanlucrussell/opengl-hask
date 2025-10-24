@@ -30,6 +30,12 @@ import qualified Control.Concurrent.Async
 import qualified Data.String
 
 
+import qualified Graphics.Rasterific
+import qualified Graphics.Rasterific.Texture
+import qualified Graphics.Text.TrueType
+
+
+
 --- LINEAR ALGEBRA LIBRARY -----------------------------------------------------
 
 type Array n s = Finite n -> s
@@ -136,7 +142,7 @@ memo :: forall a. KnownNat a => Vec a -> Vec a
 memo v = (Data.Array.!) (Data.Array.listArray (0, fromIntegral (maxBound :: Finite a)) (map v finites)) . fromIntegral
 
 project :: KnownNat n => Vec n -> Vec n -> Vec n
-project a b = pure ((a `dot` b) / magnitude b) * b 
+project a b = pure (a `dot` b) * normalize b 
 
 
 north :: Vec 3 = v3 1 0 0
@@ -318,6 +324,68 @@ icosahedron =
     , (11, 9, 5)
     ]
   }
+
+
+--- FONTS ----------------------------------------------------------------------
+
+loadFixedsys :: IO (String -> Float -> Codec.Picture.Image Codec.Picture.PixelRGBA8)
+loadFixedsys =
+ -- Graphics.Text.TrueType.loadFontFile "resources/times.ttf" >>=
+ Graphics.Text.TrueType.loadFontFile "resources/fixedsys.ttf" >>=
+   either
+      (fail . show)
+      (\font ->
+        pure (\text size ->
+          let bgColor = Codec.Picture.PixelRGBA8 255 255 0 255
+              fgColor = Codec.Picture.PixelRGBA8 0 0 0 255
+              dpi = 96 -- IS THIS RELEVANT AT ALL? YES! all bounding box things scale linearly w/ dpi
+              boundingBox = Graphics.Text.TrueType.stringBoundingBox font dpi (Graphics.Text.TrueType.PointSize size) text
+              width = round (Graphics.Text.TrueType._xMax boundingBox - Graphics.Text.TrueType._xMin boundingBox)
+              height = round (Graphics.Text.TrueType._yMax boundingBox - Graphics.Text.TrueType._yMin boundingBox)
+          in
+           Graphics.Rasterific.renderDrawing width height bgColor $
+           Graphics.Rasterific.withTexture (Graphics.Rasterific.Texture.uniformTexture fgColor) $
+           -- bounding box has y start at bottom while rasteriffic has y start at top, origin at 0 0
+           Graphics.Rasterific.printTextAt
+              font
+              (Graphics.Rasterific.PointSize size)
+              (Graphics.Rasterific.V2
+                 (-Graphics.Text.TrueType._xMin boundingBox)
+                 (Graphics.Text.TrueType._yMax boundingBox))
+              text))
+
+
+
+loadTexture :: Codec.Picture.Image Codec.Picture.PixelRGBA8 -> IO GL.GLuint
+loadTexture img = do
+  -- opengl textures start at the bottom left so gotta flip
+  let flippedY = Codec.Picture.generateImage
+        (\x y -> Codec.Picture.pixelAt img x (Codec.Picture.imageHeight img - 1 - y))
+        (Codec.Picture.imageWidth img) (Codec.Picture.imageHeight img)
+  textureID <- Foreign.alloca $ \textureIDPtr -> do
+      GL.glGenTextures 1 textureIDPtr
+      Foreign.peek textureIDPtr
+  GL.glBindTexture GL.GL_TEXTURE_2D textureID
+  Data.Vector.Storable.unsafeWith
+     (Codec.Picture.imageData flippedY)
+     (GL.glTexImage2D
+        GL.GL_TEXTURE_2D
+        0
+        (fromIntegral GL.GL_SRGB8_ALPHA8)
+        (fromIntegral (Codec.Picture.imageWidth img))
+        (fromIntegral (Codec.Picture.imageHeight img))
+        0
+        GL.GL_RGBA
+        GL.GL_UNSIGNED_BYTE
+        . Foreign.castPtr)
+  GL.glPixelStorei GL.GL_UNPACK_ALIGNMENT 1
+  GL.glTexParameteri GL.GL_TEXTURE_2D GL.GL_TEXTURE_MIN_FILTER (fromIntegral GL.GL_LINEAR_MIPMAP_LINEAR)
+  GL.glTexParameteri GL.GL_TEXTURE_2D GL.GL_TEXTURE_MAG_FILTER (fromIntegral GL.GL_LINEAR)
+  GL.glTexParameteri GL.GL_TEXTURE_2D GL.GL_TEXTURE_WRAP_S (fromIntegral GL.GL_REPEAT)
+  GL.glTexParameteri GL.GL_TEXTURE_2D GL.GL_TEXTURE_WRAP_T (fromIntegral GL.GL_REPEAT)
+  GL.glGenerateMipmap GL.GL_TEXTURE_2D
+  pure textureID
+
 
 --- SMD PARSER -----------------------------------------------------------------
 
@@ -506,6 +574,51 @@ smdToTexturedSkeletonVertex v =
         _ -> v4 (-1) (-1) (-1) (-1))
 
 
+buildShader shaderType shaderSrc programID = do
+  shaderID <- GL.glCreateShader shaderType
+  Foreign.C.String.withCString shaderSrc (\cstr -> Foreign.with cstr $ \cstrPtr ->
+    GL.glShaderSource shaderID 1 cstrPtr Foreign.nullPtr)
+  GL.glCompileShader shaderID
+  compileStatus <- Foreign.alloca $ \compileStatusPtr -> do
+    GL.glGetShaderiv shaderID GL.GL_COMPILE_STATUS compileStatusPtr
+    Foreign.peek compileStatusPtr
+  when (compileStatus /= 1) $ do
+    infoLogLength <- Foreign.alloca $ \infoLogLengthPtr -> do
+      GL.glGetShaderiv shaderID GL.GL_INFO_LOG_LENGTH infoLogLengthPtr
+      Foreign.peek infoLogLengthPtr
+    errorMessage <- Foreign.allocaArray (fromIntegral infoLogLength) $ \logPtr -> do
+      GL.glGetShaderInfoLog shaderID infoLogLength Foreign.nullPtr logPtr
+      Foreign.C.String.peekCString logPtr
+    error errorMessage
+  GL.glAttachShader programID shaderID
+  GL.glDeleteShader shaderID
+
+linkShader programID = do
+  GL.glLinkProgram programID
+  linkStatus <- Foreign.alloca $ \linkStatusPtr -> do
+    GL.glGetProgramiv programID GL.GL_LINK_STATUS linkStatusPtr
+    Foreign.peek linkStatusPtr
+  when (linkStatus /= 1) $ do
+    infoLogLength <- Foreign.alloca $ \infoLogLengthPtr -> do
+      GL.glGetProgramiv programID GL.GL_INFO_LOG_LENGTH infoLogLengthPtr
+      Foreign.peek infoLogLengthPtr
+    errorMessage <- Foreign.allocaArray (fromIntegral infoLogLength) $ \logPtr -> do
+      GL.glGetProgramInfoLog programID infoLogLength Foreign.nullPtr logPtr
+      Foreign.C.String.peekCString logPtr
+    error errorMessage
+  pure programID
+
+initComputeShader computeShaderCode = do
+  programID <- GL.glCreateProgram
+  buildShader GL.GL_COMPUTE_SHADER computeShaderCode programID
+  linkShader programID
+
+initShader vertexShaderCode fragmentShaderCode = do
+  programID <- GL.glCreateProgram
+  buildShader GL.GL_VERTEX_SHADER vertexShaderCode programID
+  buildShader GL.GL_FRAGMENT_SHADER fragmentShaderCode programID
+  linkShader programID
+
 --- VERTEX/ATTRIBUTE TYPES -----------------------------------------------------
 
 size :: forall a.Foreign.Storable a => Int
@@ -564,22 +677,26 @@ configureAttributes = configureAttributesOpen @v (fromIntegral (size @v)) 0 Fore
 class Index i where
   flatten :: i -> [GL.GLushort]
   indexDim :: Int
+  primitiveType :: GL.GLenum
 
 instance Integral i => Index (i,i,i) where
   flatten (a,b,c) = fromIntegral <$> [a,b,c]
   indexDim = 3
+  primitiveType = GL.GL_TRIANGLES
 
 instance Integral i => Index (i,i) where
   flatten (a,b) = fromIntegral <$> [a,b]
   indexDim = 2
+  primitiveType = GL.GL_LINES
 
 instance Index Int where
   flatten = pure . fromIntegral
   indexDim = 1
+  primitiveType = GL.GL_POINTS
 
 data BufferMetadata = BufferMetadata { vertexArrayID :: GL.GLuint, indexCount :: GL.GLsizei } deriving Show
 
-genBuffer :: forall v i.(Foreign.Storable v, Vertex v, Index i) => [i] -> [v] -> IO BufferMetadata
+genBuffer :: forall v i.(Foreign.Storable v, Vertex v, Index i) => [i] -> [v] -> IO (IO ())
 genBuffer indices verts = do
   vertexArrayObjectID <- Foreign.alloca $ \idPtr -> do
       GL.glGenVertexArrays 1 idPtr
@@ -599,7 +716,10 @@ genBuffer indices verts = do
   let vertexBufferSize = fromIntegral (size @v * length verts)
   Foreign.withArray verts (flip (GL.glBufferData GL.GL_ARRAY_BUFFER vertexBufferSize) GL.GL_STATIC_DRAW)
   configureAttributes @v
-  pure (BufferMetadata { vertexArrayID = vertexArrayObjectID , indexCount = fromIntegral (indexDim @i * length indices) })
+  return $ do
+    GL.glBindVertexArray vertexArrayObjectID
+    GL.glDrawElements (primitiveType @i) (fromIntegral (indexDim @i * length indices)) GL.GL_UNSIGNED_SHORT Foreign.nullPtr
+
 
 --- TEXTURED SKELETON SHADER ---------------------------------------------------
 
@@ -929,51 +1049,6 @@ main = do
 
   --- CONFIGURE SHADERS --------------------------------------------------------
 
-  let buildShader shaderType shaderSrc programID = do
-        shaderID <- GL.glCreateShader shaderType
-        Foreign.C.String.withCString shaderSrc (\cstr -> Foreign.with cstr $ \cstrPtr ->
-          GL.glShaderSource shaderID 1 cstrPtr Foreign.nullPtr)
-        GL.glCompileShader shaderID
-        compileStatus <- Foreign.alloca $ \compileStatusPtr -> do
-          GL.glGetShaderiv shaderID GL.GL_COMPILE_STATUS compileStatusPtr
-          Foreign.peek compileStatusPtr
-        when (compileStatus /= 1) $ do
-          infoLogLength <- Foreign.alloca $ \infoLogLengthPtr -> do
-            GL.glGetShaderiv shaderID GL.GL_INFO_LOG_LENGTH infoLogLengthPtr
-            Foreign.peek infoLogLengthPtr
-          errorMessage <- Foreign.allocaArray (fromIntegral infoLogLength) $ \logPtr -> do
-            GL.glGetShaderInfoLog shaderID infoLogLength Foreign.nullPtr logPtr
-            Foreign.C.String.peekCString logPtr
-          error errorMessage
-        GL.glAttachShader programID shaderID
-        GL.glDeleteShader shaderID
-
-  let linkShader programID = do
-        GL.glLinkProgram programID
-        linkStatus <- Foreign.alloca $ \linkStatusPtr -> do
-          GL.glGetProgramiv programID GL.GL_LINK_STATUS linkStatusPtr
-          Foreign.peek linkStatusPtr
-        when (linkStatus /= 1) $ do
-          infoLogLength <- Foreign.alloca $ \infoLogLengthPtr -> do
-            GL.glGetProgramiv programID GL.GL_INFO_LOG_LENGTH infoLogLengthPtr
-            Foreign.peek infoLogLengthPtr
-          errorMessage <- Foreign.allocaArray (fromIntegral infoLogLength) $ \logPtr -> do
-            GL.glGetProgramInfoLog programID infoLogLength Foreign.nullPtr logPtr
-            Foreign.C.String.peekCString logPtr
-          error errorMessage
-        pure programID
-
-  let initComputeShader computeShaderCode = do
-        programID <- GL.glCreateProgram
-        buildShader GL.GL_COMPUTE_SHADER computeShaderCode programID
-        linkShader programID
-
-  let initShader vertexShaderCode fragmentShaderCode = do
-        programID <- GL.glCreateProgram
-        buildShader GL.GL_VERTEX_SHADER vertexShaderCode programID
-        buildShader GL.GL_FRAGMENT_SHADER fragmentShaderCode programID
-        linkShader programID
-
   lorenzComputeShader <- initComputeShader lorenzComputeSrc
   aizawaComputeShader <- initComputeShader aizawaComputeSrc
 
@@ -989,12 +1064,12 @@ main = do
   let initializeObject obj =
         genBuffer (faces obj) (zipWith (\v n -> position v :& color v :& n) (vertices obj) (normals obj))
   
-  cubeMetadata <- initializeObject cubeObj
-  pyramidMetadata <- initializeObject pyramidObj
-  planeMetadata <- initializeObject planeObj
-  icosahedronMetadata <- initializeObject icosahedron
+  renderCube <- initializeObject cubeObj
+  renderPyramid <- initializeObject pyramidObj
+  renderPlane <- initializeObject planeObj
+  renderIcosahedron <- initializeObject icosahedron
 
-  teapotMetadata <- do
+  renderTeapot <- do
     let filename = "resources/teapot.obj"
     readFile filename >>= either (error . show) initializeObject . MP.parse pObj filename
 
@@ -1006,7 +1081,7 @@ main = do
     let filename = "resources/Zigzagoon/anims/Bounce.smd"
     readFile filename >>= either (error . show) (pure . smdscale 0.03) . MP.parse pSMD filename
 
-  pictureFrame <-
+  renderPictureFrame <-
      genBuffer @(Vec 3 :& Vec 2) @(Int,Int,Int)
         [(0,1,2),(2,1,3)]
         [ v3 1 0 1 :& v2 0 1
@@ -1017,32 +1092,7 @@ main = do
 
   let readImg path = do
         img <- Codec.Picture.convertRGBA8 <$> (Codec.Picture.readImage path >>= either error pure)
-        -- opengl textures start at the bottom left so gotta flip
-        let flippedY = Codec.Picture.generateImage
-              (\x y -> Codec.Picture.pixelAt img x (Codec.Picture.imageHeight img - 1 - y))
-              (Codec.Picture.imageWidth img) (Codec.Picture.imageHeight img)
-        textureID <- Foreign.alloca $ \textureIDPtr -> do
-            GL.glGenTextures 1 textureIDPtr
-            Foreign.peek textureIDPtr
-        GL.glBindTexture GL.GL_TEXTURE_2D textureID
-        Data.Vector.Storable.unsafeWith
-           (Codec.Picture.imageData flippedY)
-           (GL.glTexImage2D
-              GL.GL_TEXTURE_2D
-              0
-              (fromIntegral GL.GL_SRGB8_ALPHA8)
-              (fromIntegral (Codec.Picture.imageWidth img))
-              (fromIntegral (Codec.Picture.imageHeight img))
-              0
-              GL.GL_RGBA
-              GL.GL_UNSIGNED_BYTE
-              . Foreign.castPtr)
-        GL.glPixelStorei GL.GL_UNPACK_ALIGNMENT 1
-        GL.glTexParameteri GL.GL_TEXTURE_2D GL.GL_TEXTURE_MIN_FILTER (fromIntegral GL.GL_LINEAR_MIPMAP_LINEAR)
-        GL.glTexParameteri GL.GL_TEXTURE_2D GL.GL_TEXTURE_MAG_FILTER (fromIntegral GL.GL_LINEAR)
-        GL.glTexParameteri GL.GL_TEXTURE_2D GL.GL_TEXTURE_WRAP_S (fromIntegral GL.GL_REPEAT)
-        GL.glTexParameteri GL.GL_TEXTURE_2D GL.GL_TEXTURE_WRAP_T (fromIntegral GL.GL_REPEAT)
-        GL.glGenerateMipmap GL.GL_TEXTURE_2D
+        textureID <- loadTexture img
         let aspectRatio = fromIntegral (Codec.Picture.imageWidth img) / fromIntegral (Codec.Picture.imageHeight img)
         pure (textureID,aspectRatio)
 
@@ -1061,6 +1111,14 @@ main = do
 
   tour <- readImg "resources/tour-of-the-universe-mccall-studios-1.jpg"
 
+
+  fixedsys <- loadFixedsys
+  let fontText = fixedsys "testing" 48
+  fontTexture <- do
+    textureID <- loadTexture fontText
+    let aspectRatio = fromIntegral (Codec.Picture.imageWidth fontText) / fromIntegral (Codec.Picture.imageHeight fontText)
+    pure (textureID,aspectRatio)
+    
 
   --- CONFIGURE COMPUTE SHADER -------------------------------------------------
   
@@ -1153,11 +1211,10 @@ main = do
         let worldToView = worldToViewMatrix (cameraPosition appState . weaken) (cameraViewDirection . weaken)
         let projectionMatrix = projection 60 aspectRatio 0.1 50
         let toScreenspace t = projectionMatrix . worldToView . t
-        let drawTriangulation shader obj transform = do
-              GL.glBindVertexArray (vertexArrayID obj)
+        let drawTriangulation shader renderObj transform = do
               setShaderUniform shader "modelToWorldTransformMatrix" transform
               setShaderUniform shader "modelToProjectionMatrix" (toScreenspace transform)
-              GL.glDrawElements GL.GL_TRIANGLES (indexCount obj) GL.GL_UNSIGNED_SHORT Foreign.nullPtr
+              renderObj
         let lightPosition = 3*north + 2*east
 
         GL.glUseProgram basicShader
@@ -1166,11 +1223,11 @@ main = do
         setShaderUniform basicShader "lightPosition" lightPosition
         setShaderUniform basicShader "eyePosition" (cameraPosition appState . weaken)
 
-        drawTriangulation basicShader cubeMetadata (translate (north + 4*west) . rotateAround (v3 1 1 0) 45)
-        drawTriangulation basicShader cubeMetadata (translate (south + 4*west) . rotateAround (v3 1 1 1) 45)
-        drawTriangulation basicShader pyramidMetadata (translate (2*west))
-        drawTriangulation basicShader planeMetadata (translate (2*down + 4*west))
-        drawTriangulation basicShader teapotMetadata (translate (3*north + up + 8*west))
+        drawTriangulation basicShader renderCube (translate (north + 4*west) . rotateAround (v3 1 1 0) 45)
+        drawTriangulation basicShader renderCube (translate (south + 4*west) . rotateAround (v3 1 1 1) 45)
+        drawTriangulation basicShader renderPyramid (translate (2*west))
+        drawTriangulation basicShader renderPlane (translate (2*down + 4*west))
+        drawTriangulation basicShader renderTeapot (translate (3*north + up + 8*west))
 
 
 
@@ -1197,8 +1254,6 @@ main = do
 
         when toggleLight $ do
           let lightCommand =  if lightOn prevAppState then "off" else "on"
-          -- System.Process.spawnProcess "/home/endless/laboratory/simulacrum/set-light.nu" [lightCommand]
-          -- let token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJhYzg3OGQ4NjQyOTE0MmEwYWY0ZWI5ZGMyODRjZmU0MCIsImlhdCI6MTc2MDc0ODYyNSwiZXhwIjoyMDc2MTA4NjI1fQ.icKT9894NC4FKtjo_ZZjv2bkh8i_vr1Hz8VHFlXpM_4"
           let request =
                 Network.HTTP.Simple.setRequestMethod "POST"
                 $ Network.HTTP.Simple.setRequestBodyJSON (Data.Aeson.object ["entity_id" Data.Aeson..= ("light.l" :: String)])
@@ -1210,10 +1265,9 @@ main = do
 
         
         GL.glUseProgram uniformColorShader
-        GL.glBindVertexArray (vertexArrayID icosahedronMetadata)
         setShaderUniform uniformColorShader "color" color
         setShaderUniform uniformColorShader "modelToProjectionMatrix" (toScreenspace (translate hitboxCenter))
-        GL.glDrawElements GL.GL_TRIANGLES (indexCount icosahedronMetadata) GL.GL_UNSIGNED_SHORT Foreign.nullPtr
+        renderIcosahedron
 
         let zigTransform = translate (2*south + 2*down + west) . rotateAround up 45 . rotateAround south 90
 
@@ -1240,16 +1294,24 @@ main = do
         GL.glBindTexture GL.GL_TEXTURE_2D (fst tour)
         Foreign.C.String.withCString "texture" (GL.glGetUniformLocation pictureShader) >>= flip GL.glUniform1i 0
         GL.glUseProgram pictureShader
-        GL.glBindVertexArray (vertexArrayID pictureFrame)
         setShaderUniform pictureShader "aspectRatio" (snd tour :: Float)
         setShaderUniform pictureShader "modelToProjectionMatrix" (toScreenspace portraitTransform)
-        GL.glDrawElements GL.GL_TRIANGLES 6 GL.GL_UNSIGNED_SHORT Foreign.nullPtr
+        renderPictureFrame
+
+        let portraitTransform = translate (9*south + 2*up) . rotateAround down 90 . rotateAround south 90
+        GL.glActiveTexture GL.GL_TEXTURE0
+        GL.glBindTexture GL.GL_TEXTURE_2D (fst fontTexture)
+        Foreign.C.String.withCString "texture" (GL.glGetUniformLocation pictureShader) >>= flip GL.glUniform1i 0
+        GL.glUseProgram pictureShader
+        setShaderUniform pictureShader "aspectRatio" (snd fontTexture :: Float)
+        setShaderUniform pictureShader "modelToProjectionMatrix" (toScreenspace portraitTransform)
+        renderPictureFrame
         
 
         -- GL.glClear GL.GL_DEPTH_BUFFER_BIT
         -- GL.glUseProgram skellyShader
-        -- GL.glBindVertexArray (vertexArrayID skelly)
         -- setShaderUniform skellyShader "modelToProjectionMatrix" (toScreenspace zigTransform)
+        -- GL.glBindVertexArray (vertexArrayID skelly)
         -- GL.glDrawElements GL.GL_LINES (indexCount skelly) GL.GL_UNSIGNED_SHORT Foreign.nullPtr
 
         GL.glEnable GL.GL_BLEND

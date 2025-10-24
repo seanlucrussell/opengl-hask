@@ -25,6 +25,20 @@ super common pattern im noticing: `foreign.alloca thing (\ptr -> do {f ptr; Fore
 
 
 
+I DON'T NEED THE INDEX COUNT! instead of generating an index count and then trying to keep track of whether our thing is a triangle renderer or a line renderer or a point renderer, we can have our index datatype keep track of rendering modes and have the buffer just return a render oneliner. we don't really need the vertex array id either! i don't think.
+
+yea. yea yea. every call to glBindVertexArray is associated with glDrawElements. in theory if we want super maximum efficiency we could get rid of this if we are duplicating draws of the same thing. but then idk we should be using instancing anyways right? much better to get rid of the whole metadata concept and have the draw calls be things like `drawSkelly` or `drawPyramid`.
+
+
+ALSO. remove shader initialization generic code from the body of main. this should go under gl utils or something like that.
+
+
+concept: make the unit directions into scalar functions. instead of `3 * north` we'd say `north 3`. imo this makes way more sense and works better with the implementation
+
+
+
+the network is a fundamental UI abstraction. loops, polygons, lines, chains, etc. all just networks. but so are a lot of charts and more sophisticated things. just lines connecting points.
+
 
 
 sphere generation: a good sphere generation from n points (or n faces) would satisfy the following criteria as well as possible:
