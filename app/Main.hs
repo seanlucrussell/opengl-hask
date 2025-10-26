@@ -328,6 +328,36 @@ icosahedron =
 
 --- FONTS ----------------------------------------------------------------------
 
+
+-- ugh maybe the correct way to do this is actually just to render to the full screen w/ transparency. if we render with screen width and screen height instead of the calculated width and height here we can at least put them in the right location. then we can just grab the bounding box w/o making a whole fuss of it. really don't like this idea but it might be the simplest way to implement font rendering
+
+-- loadFixedsys :: IO (String -> Float -> Codec.Picture.Image Codec.Picture.PixelRGBA8)
+-- loadFixedsys =
+--  -- Graphics.Text.TrueType.loadFontFile "resources/times.ttf" >>=
+--  Graphics.Text.TrueType.loadFontFile "resources/fixedsys.ttf" >>=
+--    either
+--       (fail . show)
+--       (\font ->
+--         pure (\text size ->
+--           let bgColor = Codec.Picture.PixelRGBA8 255 255 0 255
+--               fgColor = Codec.Picture.PixelRGBA8 0 0 0 255
+--               dpi = 96 -- IS THIS RELEVANT AT ALL? YES! all bounding box things scale linearly w/ dpi
+--               boundingBox = Graphics.Text.TrueType.stringBoundingBox font dpi (Graphics.Text.TrueType.PointSize size) text
+--               width = round (Graphics.Text.TrueType._xMax boundingBox - Graphics.Text.TrueType._xMin boundingBox)
+--               height = round (Graphics.Text.TrueType._yMax boundingBox - Graphics.Text.TrueType._yMin boundingBox)
+--           in
+--            Graphics.Rasterific.renderDrawing width height bgColor $
+--            Graphics.Rasterific.withTexture (Graphics.Rasterific.Texture.uniformTexture fgColor) $
+--            -- bounding box has y start at bottom while rasteriffic has y start at top, origin at 0 0
+--            Graphics.Rasterific.printTextAt
+--               font
+--               (Graphics.Rasterific.PointSize size)
+--               (Graphics.Rasterific.V2
+--                  (-Graphics.Text.TrueType._xMin boundingBox)
+--                  (Graphics.Text.TrueType._yMax boundingBox))
+--               text))
+
+
 loadFixedsys :: IO (String -> Float -> Codec.Picture.Image Codec.Picture.PixelRGBA8)
 loadFixedsys =
  -- Graphics.Text.TrueType.loadFontFile "resources/times.ttf" >>=
@@ -336,22 +366,16 @@ loadFixedsys =
       (fail . show)
       (\font ->
         pure (\text size ->
-          let bgColor = Codec.Picture.PixelRGBA8 255 255 0 255
-              fgColor = Codec.Picture.PixelRGBA8 0 0 0 255
-              dpi = 96 -- IS THIS RELEVANT AT ALL? YES! all bounding box things scale linearly w/ dpi
-              boundingBox = Graphics.Text.TrueType.stringBoundingBox font dpi (Graphics.Text.TrueType.PointSize size) text
-              width = round (Graphics.Text.TrueType._xMax boundingBox - Graphics.Text.TrueType._xMin boundingBox)
-              height = round (Graphics.Text.TrueType._yMax boundingBox - Graphics.Text.TrueType._yMin boundingBox)
+          -- let bgColor = Codec.Picture.PixelRGBA8 255 255 0 255
+          let bgColor = Codec.Picture.PixelRGBA8 0 0 0 0
+              fgColor = Codec.Picture.PixelRGBA8 255 255 255 255
           in
-           Graphics.Rasterific.renderDrawing width height bgColor $
+           Graphics.Rasterific.renderDrawing 800 600 bgColor $
            Graphics.Rasterific.withTexture (Graphics.Rasterific.Texture.uniformTexture fgColor) $
-           -- bounding box has y start at bottom while rasteriffic has y start at top, origin at 0 0
            Graphics.Rasterific.printTextAt
               font
               (Graphics.Rasterific.PointSize size)
-              (Graphics.Rasterific.V2
-                 (-Graphics.Text.TrueType._xMin boundingBox)
-                 (Graphics.Text.TrueType._yMax boundingBox))
+              (Graphics.Rasterific.V2 60 200)
               text))
 
 
@@ -951,6 +975,29 @@ positionFragmentSrc =
   """
 
 
+--- SCREEN OVERLAY SHADER ------------------------------------------------------
+
+screenOverlayVertexSrc =
+  """#version 430\r\n
+  in layout(location=0) vec2 vertexPosition;
+  out vec2 fragment_uv;
+  void main() {
+    gl_Position = vec4(vertexPosition,0,1);
+    fragment_uv = (vertexPosition + 1)/2;
+  }
+  """
+  
+
+screenOverlayFragmentSrc =
+  """#version 430\r\n
+  uniform sampler2D base_texture;
+  in vec2 fragment_uv;
+  out vec4 fragmentColor;
+  void main() {
+    fragmentColor = texture(base_texture,fragment_uv);
+  }
+  """
+
 --- PICTURE FRAME SHADER -------------------------------------------------------
 
 type PictureVertex = Vec 4
@@ -1057,6 +1104,7 @@ main = do
   textureShader <- initShader texturedSkeletonVertexSrc texturedSkeletonFragmentSrc
   skellyShader <- initShader positionVertexSrc positionFragmentSrc
   pictureShader <- initShader pictureVertexSrc pictureFragmentSrc
+  screenOverlayShader <- initShader screenOverlayVertexSrc screenOverlayFragmentSrc
   uniformColorShader <- initShader uniformColorVertexSrc uniformColorFragmentSrc
 
   --- LOAD OBJECTS -------------------------------------------------------------
@@ -1089,6 +1137,10 @@ main = do
         , v3 (-1) 0 1 :& v2 1 1
         , v3 (-1) 0 (-1) :& v2 1 0
         ]
+
+  drawScreenOverlay <- genBuffer [(2,1,0)::(Int,Int,Int),(3,1,2)] [v2 1 1, v2 1 (-1), v2 (-1) 1, v2 (-1) (-1)]
+
+
 
   let readImg path = do
         img <- Codec.Picture.convertRGBA8 <$> (Codec.Picture.readImage path >>= either error pure)
@@ -1297,15 +1349,6 @@ main = do
         setShaderUniform pictureShader "aspectRatio" (snd tour :: Float)
         setShaderUniform pictureShader "modelToProjectionMatrix" (toScreenspace portraitTransform)
         renderPictureFrame
-
-        let portraitTransform = translate (9*south + 2*up) . rotateAround down 90 . rotateAround south 90
-        GL.glActiveTexture GL.GL_TEXTURE0
-        GL.glBindTexture GL.GL_TEXTURE_2D (fst fontTexture)
-        Foreign.C.String.withCString "texture" (GL.glGetUniformLocation pictureShader) >>= flip GL.glUniform1i 0
-        GL.glUseProgram pictureShader
-        setShaderUniform pictureShader "aspectRatio" (snd fontTexture :: Float)
-        setShaderUniform pictureShader "modelToProjectionMatrix" (toScreenspace portraitTransform)
-        renderPictureFrame
         
 
         -- GL.glClear GL.GL_DEPTH_BUFFER_BIT
@@ -1337,6 +1380,19 @@ main = do
         GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 1 (aizawaParticleBufferOut appState)
         setShaderUniform sparkleShader "modelToProjectionMatrix" (toScreenspace pointCloudTransform)
         GL.glDrawArrays GL.GL_POINTS 0 (fromIntegral $ length initialPositionsAizawa)
+        GL.glDepthMask GL.GL_TRUE
+        GL.glDisable GL.GL_BLEND
+
+
+        GL.glEnable GL.GL_BLEND
+        GL.glBlendFunc GL.GL_SRC_ALPHA GL.GL_ONE_MINUS_SRC_ALPHA
+        GL.glDepthMask GL.GL_FALSE
+        GL.glEnable GL.GL_PROGRAM_POINT_SIZE
+        GL.glActiveTexture GL.GL_TEXTURE0
+        GL.glBindTexture GL.GL_TEXTURE_2D (fst fontTexture)
+        Foreign.C.String.withCString "texture" (GL.glGetUniformLocation screenOverlayShader) >>= flip GL.glUniform1i 0
+        GL.glUseProgram screenOverlayShader
+        drawScreenOverlay
         GL.glDepthMask GL.GL_TRUE
         GL.glDisable GL.GL_BLEND
 
