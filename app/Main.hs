@@ -378,8 +378,6 @@ loadFixedsys =
               (Graphics.Rasterific.V2 60 200)
               text))
 
-
-
 loadTexture :: Codec.Picture.Image Codec.Picture.PixelRGBA8 -> IO GL.GLuint
 loadTexture img = do
   -- opengl textures start at the bottom left so gotta flip
@@ -998,6 +996,26 @@ screenOverlayFragmentSrc =
   }
   """
 
+
+--- 2D RASTER SHADER -----------------------------------------------------------
+
+raster2dVertexSrc =
+  """#version 430\r\n
+  in layout(location=0) vec2 vertexPosition;
+  void main() {
+    gl_Position = vec4(vertexPosition,0,1);
+  }
+  """
+
+raster2dFragmentSrc =
+  """#version 430\r\n
+  uniform vec4 color;
+  out vec4 fragmentColor;
+  void main() {
+    fragmentColor = color;
+  }
+  """
+
 --- PICTURE FRAME SHADER -------------------------------------------------------
 
 type PictureVertex = Vec 4
@@ -1104,6 +1122,7 @@ main = do
   textureShader <- initShader texturedSkeletonVertexSrc texturedSkeletonFragmentSrc
   skellyShader <- initShader positionVertexSrc positionFragmentSrc
   pictureShader <- initShader pictureVertexSrc pictureFragmentSrc
+  raster2dShader <- initShader raster2dVertexSrc raster2dFragmentSrc
   screenOverlayShader <- initShader screenOverlayVertexSrc screenOverlayFragmentSrc
   uniformColorShader <- initShader uniformColorVertexSrc uniformColorFragmentSrc
 
@@ -1141,6 +1160,12 @@ main = do
   drawScreenOverlay <- genBuffer [(2,1,0)::(Int,Int,Int),(3,1,2)] [v2 1 1, v2 1 (-1), v2 (-1) 1, v2 (-1) (-1)]
 
 
+  drawCircle <- let numPoints = 100 in
+     genBuffer
+       [(i `mod` numPoints ,(i+1) `mod` numPoints) | i<-[0..numPoints+1]]
+       [v2 (cos (2 * pi * fromIntegral i / fromIntegral numPoints)) (sin (2 * pi * fromIntegral i / fromIntegral numPoints)) | i <- [0..numPoints]]
+
+
 
   let readImg path = do
         img <- Codec.Picture.convertRGBA8 <$> (Codec.Picture.readImage path >>= either error pure)
@@ -1164,12 +1189,36 @@ main = do
   tour <- readImg "resources/tour-of-the-universe-mccall-studios-1.jpg"
 
 
-  fixedsys <- loadFixedsys
-  let fontText = fixedsys "testing" 48
-  fontTexture <- do
-    textureID <- loadTexture fontText
-    let aspectRatio = fromIntegral (Codec.Picture.imageWidth fontText) / fromIntegral (Codec.Picture.imageHeight fontText)
-    pure (textureID,aspectRatio)
+  fixedsysTexture <- do
+    fixedsys <- Graphics.Text.TrueType.loadFontFile "resources/fixedsys.ttf" >>= either (fail.show) pure 
+    let bgColor = Codec.Picture.PixelRGBA8 0 0 0 0
+        fgColor = Codec.Picture.PixelRGBA8 255 255 255 255
+        size = 48
+        width = 800
+        height = 600
+    let fontText = Graphics.Rasterific.renderDrawing 800 600 bgColor $
+                   Graphics.Rasterific.withTexture (Graphics.Rasterific.Texture.uniformTexture fgColor) $ do
+                     Graphics.Rasterific.printTextAt
+                        fixedsys
+                        (Graphics.Rasterific.PointSize size)
+                        (Graphics.Rasterific.V2 60 200)
+                        "testing"
+                     Graphics.Rasterific.printTextAt
+                        fixedsys
+                        (Graphics.Rasterific.PointSize size)
+                        (Graphics.Rasterific.V2 460 200)
+                        "testing"
+                     Graphics.Rasterific.printTextAt
+                        fixedsys
+                        (Graphics.Rasterific.PointSize size)
+                        (Graphics.Rasterific.V2 60 500)
+                        "testing"
+                     Graphics.Rasterific.printTextAt
+                        fixedsys
+                        (Graphics.Rasterific.PointSize size)
+                        (Graphics.Rasterific.V2 460 500)
+                        "testing"
+    loadTexture fontText
     
 
   --- CONFIGURE COMPUTE SHADER -------------------------------------------------
@@ -1351,6 +1400,10 @@ main = do
         renderPictureFrame
         
 
+        GL.glUseProgram raster2dShader
+        setShaderUniform raster2dShader "color" (v4 1 1 1 1)
+        drawCircle
+
         -- GL.glClear GL.GL_DEPTH_BUFFER_BIT
         -- GL.glUseProgram skellyShader
         -- setShaderUniform skellyShader "modelToProjectionMatrix" (toScreenspace zigTransform)
@@ -1389,7 +1442,7 @@ main = do
         GL.glDepthMask GL.GL_FALSE
         GL.glEnable GL.GL_PROGRAM_POINT_SIZE
         GL.glActiveTexture GL.GL_TEXTURE0
-        GL.glBindTexture GL.GL_TEXTURE_2D (fst fontTexture)
+        GL.glBindTexture GL.GL_TEXTURE_2D fixedsysTexture
         Foreign.C.String.withCString "texture" (GL.glGetUniformLocation screenOverlayShader) >>= flip GL.glUniform1i 0
         GL.glUseProgram screenOverlayShader
         drawScreenOverlay
