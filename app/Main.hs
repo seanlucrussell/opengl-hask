@@ -560,7 +560,6 @@ pose smd ref frame = zipWith (.)  (animposflat frame) (refposflat ref)
     refposflat frame = fmap snd (Data.List.sortOn fst (flattenRose (smdReferencePoseTransform  frame)))
     animposflat frame = fmap snd (Data.List.sortOn fst (flattenRose (smdPoseTransforms frame)))
 
-
 --- GL UTILS -------------------------------------------------------------------
 
 class SetUniform u where setUniform :: GL.GLint -> u -> IO ()
@@ -577,7 +576,7 @@ setShaderUniform programID uniformName value = do
   uniformLoc <- Foreign.C.String.withCString uniformName (GL.glGetUniformLocation programID)
   setUniform uniformLoc value
 
-smdToTexturedSkeletonVertex :: SMDVertex -> TexturedSkeletonVertex
+smdToTexturedSkeletonVertex :: SMDVertex -> Vec 3 :& Vec 3 :& Vec 2 :& Array 4 GL.GLint :& Vec 4
 smdToTexturedSkeletonVertex v =
      vPos v
   :& vNormal v
@@ -639,6 +638,12 @@ initShader vertexShaderCode fragmentShaderCode = do
   programID <- GL.glCreateProgram
   buildShader GL.GL_VERTEX_SHADER vertexShaderCode programID
   buildShader GL.GL_FRAGMENT_SHADER fragmentShaderCode programID
+  linkShader programID
+
+initGraphicsShader src = do
+  programID <- GL.glCreateProgram
+  buildShader GL.GL_VERTEX_SHADER (vertexShader src) programID
+  buildShader GL.GL_FRAGMENT_SHADER (fragmentShader src) programID
   linkShader programID
 
 --- VERTEX/ATTRIBUTE TYPES -----------------------------------------------------
@@ -743,152 +748,234 @@ genBuffer indices verts = do
     GL.glDrawElements (primitiveType @i) (fromIntegral (indexDim @i * length indices)) GL.GL_UNSIGNED_SHORT Foreign.nullPtr
 
 
---- TEXTURED SKELETON SHADER ---------------------------------------------------
+--- GLSL DSL EXPERIMENT --------------------------------------------------------
 
-type TexturedSkeletonVertex = Vec 3 :& Vec 3 :& Vec 2 :& Array 4 GL.GLint :& Vec 4
+newtype GLSL t = GLSL String
 
-texturedSkeletonVertexSrc = 
-  """#version 430\r\n
-  uniform mat4 modelToProjectionMatrix;
-  uniform mat4 modelToWorldTransformMatrix;
-  uniform mat4 bones[128];
-  in layout(location=0) vec4 vertexPositionModelSpace;
-  in layout(location=1) vec3 normalModelSpace;
-  in layout(location=2) vec2 vertex_uv;
-  in layout(location=3) ivec4 parentId;
-  in layout(location=4) vec4 weights;
-  out vec3 normalWorldSpace;
-  out vec2 fragment_uv;
-  out vec3 vertexPositionWorldSpace;
-  void main() {
-    vec4 posePosition = vec4(0);
-    if (parentId[0] != -1) posePosition += weights[0] * bones[parentId[0]] * vertexPositionModelSpace;
-    if (parentId[1] != -1) posePosition += weights[1] * bones[parentId[1]] * vertexPositionModelSpace;
-    if (parentId[2] != -1) posePosition += weights[2] * bones[parentId[2]] * vertexPositionModelSpace;
-    if (parentId[3] != -1) posePosition += weights[3] * bones[parentId[3]] * vertexPositionModelSpace;
-    gl_Position = modelToProjectionMatrix * posePosition;
-    normalWorldSpace = vec3(modelToWorldTransformMatrix * vec4(normalModelSpace,0));
-    vertexPositionWorldSpace = vec3(modelToWorldTransformMatrix * vertexPositionModelSpace);
-    fragment_uv = vertex_uv;
+instance Data.String.IsString (GLSL t) where fromString = GLSL
+
+class GLSL_Literal a where lit :: a -> GLSL a
+instance GLSL_Literal Int where lit = GLSL . show
+instance GLSL_Literal Float where lit = GLSL . show
+
+instance (Num a, GLSL_Literal a) => Num (GLSL a) where
+  (GLSL a) + (GLSL b) = GLSL ("(" ++ a ++ "+" ++ b ++ ")")
+  (GLSL a) * (GLSL b) = GLSL ("(" ++ a ++ "*" ++ b ++ ")")
+  fromInteger = lit . fromInteger
+  negate (GLSL a) = GLSL ("-(" ++ a ++ ")")
+  abs (GLSL a) = GLSL ("abs(" ++ a ++ ")")
+  signum (GLSL a) = GLSL ("sign(" ++ a ++ ")")
+
+-- data VertexShader = VertexShader
+--   { 
+--   }
+
+-- data GLSL_Type
+--   = GLSL_Float
+--   | GLSL_Int
+--   | GLSL_Vec2
+--   | GLSL_Vec3
+--   | GLSL_Vec4
+
+data GraphicsShader = GraphicsShader
+  { vertexShader :: String
+  , fragmentShader :: String
   }
-  """
 
-texturedSkeletonFragmentSrc = 
-  """#version 430\r\n
-  uniform vec3 lightPosition;
-  uniform vec3 eyePosition;
-  uniform vec4 ambientLight;
-  uniform sampler2D base_texture;
-  in vec3 normalWorldSpace;
-  in vec3 vertexPositionWorldSpace;
-  in vec2 fragment_uv;
-  out vec4 fragmentColor;
-  void main() {
-    vec3 lightVectorWorldSpace = normalize(lightPosition - vertexPositionWorldSpace);
-    float brightness = dot(lightVectorWorldSpace, normalize(normalWorldSpace));
-    vec4 diffuseLight = vec4(brightness,brightness,brightness,1.0);
-    vec3 reflectedLightWorldSpace = reflect(-lightVectorWorldSpace,normalWorldSpace);
-    vec3 eyeVectorWorldSpace = normalize(eyePosition - vertexPositionWorldSpace);
-    float s = pow(clamp(dot(reflectedLightWorldSpace, eyeVectorWorldSpace),0,1),2048);
-    vec4 specularLight = vec4(s,s,s,1.0);
-    vec4 lighting = clamp(diffuseLight,0.0,1.0) + ambientLight + clamp(specularLight,0,1);
-    fragmentColor = lighting * texture(base_texture,fragment_uv);
+genShader :: GraphicsShaderGenerator -> GraphicsShader
+genShader generator =
+ GraphicsShader
+  { vertexShader =
+       Data.List.intercalate "\n" (
+         [ "#version 430\r" ]
+         ++ fmap (\u -> "uniform " ++ u ++ ";") (uniforms generator)
+         ++ zipWith (\i v -> "layout(binding=" ++ show i ++ ") buffer " ++ v ++ ";") [0..] (buffers generator)
+         ++ zipWith (\i v -> "layout(location=" ++ show i ++ ") in " ++ v ++ ";") [0..] (vertexData generator)
+         ++ fmap (\i -> "out " ++ i ++ ";") (interpolatedData generator)
+         ++ ["void main () {"]
+         ++ [vertexShaderMain generator]
+         ++ ["}"]
+         )
+  , fragmentShader =
+       Data.List.intercalate "\n" (
+         [ "#version 430\r" ]
+         ++ fmap (\u -> "uniform " ++ u ++ ";") (uniforms generator)
+         ++ fmap (\i -> "in " ++ i ++ ";") (interpolatedData generator)
+         ++ fmap (\i -> "out " ++ i ++ ";") (outputData generator)
+         ++ ["void main () {"]
+         ++ [fragmentShaderMain generator]
+         ++ ["}"]
+         )
   }
-  """
 
-
---- COLORED NORMAL SHADER ------------------------------------------------------
-
-type ColoredNormalVertex = Vec 3 :& Vec 3 :& Vec 3
-
-coloredNormalVertexSrc =
-  """#version 430\r\n
-  uniform mat4 modelToProjectionMatrix;
-  uniform mat4 modelToWorldTransformMatrix;
-  in layout(location=0) vec4 vertexPositionModelSpace;
-  in layout(location=1) vec3 vertexColor;
-  in layout(location=2) vec3 normalModelSpace;
-  out vec3 normalWorldSpace;
-  out vec3 color;
-  out vec3 vertexPositionWorldSpace;
-  void main() {
-    gl_Position = modelToProjectionMatrix * vertexPositionModelSpace;
-    color = vertexColor;
-    normalWorldSpace = vec3(modelToWorldTransformMatrix * vec4(normalModelSpace,0));
-    vertexPositionWorldSpace = vec3(modelToWorldTransformMatrix * vertexPositionModelSpace);
+data GraphicsShaderGenerator =
+  GraphicsShaderGenerator
+  { uniforms :: [String]
+  , buffers :: [String]
+  , vertexData :: [String]
+  , interpolatedData :: [String]
+  , outputData :: [String]
+  , vertexShaderMain :: String
+  , fragmentShaderMain :: String
   }
-  """
 
-coloredNormalFragmentSrc =
-  """#version 430\r\n
-  uniform vec3 lightPosition;
-  uniform vec3 eyePosition;
-  uniform vec4 ambientLight;
-  uniform int specularity;
-  in vec3 normalWorldSpace;
-  in vec3 vertexPositionWorldSpace;
-  in vec3 color;
-  out vec4 fragmentColor;
-  void main() {
-    vec3 lightVectorWorldSpace = normalize(lightPosition - vertexPositionWorldSpace);
-    float brightness = dot(lightVectorWorldSpace, normalize(normalWorldSpace));
-    vec4 diffuseLight = vec4(brightness,brightness,brightness,1.0);
-    vec3 reflectedLightWorldSpace = reflect(-lightVectorWorldSpace,normalWorldSpace);
-    vec3 eyeVectorWorldSpace = normalize(eyePosition - vertexPositionWorldSpace);
-    float s = pow(clamp(dot(reflectedLightWorldSpace, eyeVectorWorldSpace),0,1),specularity);
-    vec4 specularLight = vec4(s,s,s,s);
-    vec4 lighting = clamp(diffuseLight,0.0,1.0) + ambientLight + clamp(specularLight,0,1);
-    fragmentColor = lighting * vec4(color,1);
+
+--- SHADERS --------------------------------------------------------------------
+
+texturedSkeletonSrc = genShader $ GraphicsShaderGenerator
+   { uniforms =
+       [ "mat4 modelToProjectionMatrix"
+       , "mat4 modelToWorldTransformMatrix"
+       , "mat4 bones[128]"
+       , "vec3 lightPosition"
+       , "vec3 eyePosition"
+       , "vec4 ambientLight"
+       , "sampler2D base_texture"
+       ]
+   , buffers = []
+   , vertexData =
+       [ "vec4 vertexPositionModelSpace"
+       , "vec3 normalModelSpace"
+       , "vec2 vertex_uv"
+       , "ivec4 parentId"
+       , "vec4 weights"
+       ]
+   , interpolatedData = [ "vec3 normalWorldSpace", "vec2 fragment_uv", "vec3 vertexPositionWorldSpace" ]
+   , outputData =  [ "vec4 fragmentColor" ]
+   , vertexShaderMain = """
+         vec4 posePosition = vec4(0);
+         if (parentId[0] != -1) posePosition += weights[0] * bones[parentId[0]] * vertexPositionModelSpace;
+         if (parentId[1] != -1) posePosition += weights[1] * bones[parentId[1]] * vertexPositionModelSpace;
+         if (parentId[2] != -1) posePosition += weights[2] * bones[parentId[2]] * vertexPositionModelSpace;
+         if (parentId[3] != -1) posePosition += weights[3] * bones[parentId[3]] * vertexPositionModelSpace;
+         gl_Position = modelToProjectionMatrix * posePosition;
+         normalWorldSpace = vec3(modelToWorldTransformMatrix * vec4(normalModelSpace,0));
+         vertexPositionWorldSpace = vec3(modelToWorldTransformMatrix * vertexPositionModelSpace);
+         fragment_uv = vertex_uv;
+       """
+   , fragmentShaderMain = """
+         vec3 lightVectorWorldSpace = normalize(lightPosition - vertexPositionWorldSpace);
+         float brightness = dot(lightVectorWorldSpace, normalize(normalWorldSpace));
+         vec4 diffuseLight = vec4(brightness,brightness,brightness,1.0);
+         vec3 reflectedLightWorldSpace = reflect(-lightVectorWorldSpace,normalWorldSpace);
+         vec3 eyeVectorWorldSpace = normalize(eyePosition - vertexPositionWorldSpace);
+         float s = pow(clamp(dot(reflectedLightWorldSpace, eyeVectorWorldSpace),0,1),2048);
+         vec4 specularLight = vec4(s,s,s,1.0);
+         vec4 lighting = clamp(diffuseLight,0.0,1.0) + ambientLight + clamp(specularLight,0,1);
+         fragmentColor = lighting * texture(base_texture,fragment_uv);
+       """
+   }
+
+coloredNormalSrc = genShader $ GraphicsShaderGenerator
+  { uniforms =
+      [ "mat4 modelToProjectionMatrix"
+      , "mat4 modelToWorldTransformMatrix"
+      , "vec3 lightPosition"
+      , "vec3 eyePosition"
+      , "vec4 ambientLight"
+      , "int specularity"
+      ]
+  , buffers = []
+  , vertexData =  [ "vec4 vertexPositionModelSpace", "vec3 vertexColor", "vec3 normalModelSpace" ]
+  , interpolatedData =  [ "vec3 normalWorldSpace", "vec3 color", "vec3 vertexPositionWorldSpace" ]
+  , outputData = ["vec4 fragmentColor"]
+  , vertexShaderMain = """
+        gl_Position = modelToProjectionMatrix * vertexPositionModelSpace;
+        color = vertexColor;
+        normalWorldSpace = vec3(modelToWorldTransformMatrix * vec4(normalModelSpace,0));
+        vertexPositionWorldSpace = vec3(modelToWorldTransformMatrix * vertexPositionModelSpace);
+      """
+  , fragmentShaderMain = """
+        vec3 lightVectorWorldSpace = normalize(lightPosition - vertexPositionWorldSpace);
+        float brightness = dot(lightVectorWorldSpace, normalize(normalWorldSpace));
+        vec4 diffuseLight = vec4(brightness,brightness,brightness,1.0);
+        vec3 reflectedLightWorldSpace = reflect(-lightVectorWorldSpace,normalWorldSpace);
+        vec3 eyeVectorWorldSpace = normalize(eyePosition - vertexPositionWorldSpace);
+        float s = pow(clamp(dot(reflectedLightWorldSpace, eyeVectorWorldSpace),0,1),specularity);
+        vec4 specularLight = vec4(s,s,s,s);
+        vec4 lighting = clamp(diffuseLight,0.0,1.0) + ambientLight + clamp(specularLight,0,1);
+        fragmentColor = lighting * vec4(color,1);
+      """
   }
-  """
 
---- UNIFORM COLOR SHADER -------------------------------------------------------
-
-
-uniformColorVertexSrc =
-  """#version 430\r\n
-  uniform mat4 modelToProjectionMatrix;
-  in layout(location=0) vec4 vertexPositionModelSpace;
-  void main() {
-    gl_Position = modelToProjectionMatrix * vertexPositionModelSpace;
+uniformColorSrc = genShader $ GraphicsShaderGenerator
+  { uniforms = [ "mat4 modelToProjectionMatrix" , "vec4 color" ]
+  , buffers = []
+  , vertexData = [ "vec4 vertexPositionModelSpace" ]
+  , interpolatedData = []
+  , outputData = [ "vec4 fragmentColor" ]
+  , vertexShaderMain = "gl_Position = modelToProjectionMatrix * vertexPositionModelSpace;"
+  , fragmentShaderMain = "fragmentColor = color;"
   }
-  """
 
-uniformColorFragmentSrc =
-  """#version 430\r\n
-  uniform vec4 color;
-  out vec4 fragmentColor;
-  void main() {
-    fragmentColor = color;
+sparkleSrc = genShader $ GraphicsShaderGenerator
+  { uniforms = [ "mat4 modelToProjectionMatrix"]
+  , buffers = ["OutPos {vec4 pos[];}"]
+  , vertexData = []
+  , interpolatedData = ["float opacity"]
+  , outputData = [ "vec4 fragmentColor" ]
+  , vertexShaderMain = """
+        vec4 vertexPositionModelSpace = pos[gl_VertexID];
+        gl_Position = modelToProjectionMatrix * vertexPositionModelSpace;
+        gl_PointSize = 1;
+        opacity = pow((1-gl_Position.z/gl_Position.w)/2,0.5);
+      """
+  , fragmentShaderMain = "fragmentColor = vec4(1,1,1,opacity);"
   }
-  """
 
---- SPARKLE SHADER -------------------------------------------------------------
-
-type SparkleVertex = Vec 3 :& Vec 3 :& Vec 3
-
-sparkleVertexSrc =
-  """#version 430\r\n
-  layout(std430, binding=1) buffer OutPos {vec4 pos[];};
-  uniform mat4 modelToProjectionMatrix;
-  out float opacity;
-  void main() {
-    vec4 vertexPositionModelSpace = pos[gl_VertexID];
-    gl_Position = modelToProjectionMatrix * vertexPositionModelSpace;
-    gl_PointSize = 1;
-    opacity = pow((1-gl_Position.z/gl_Position.w)/2,0.5);
+positionSrc = genShader $ GraphicsShaderGenerator
+  { uniforms = ["mat4 modelToProjectionMatrix"]
+  , buffers = []
+  , vertexData = ["vec4 vertexPositionModelSpace"]
+  , interpolatedData = []
+  , outputData = ["vec4 fragmentColor"]
+  , vertexShaderMain = "gl_Position = modelToProjectionMatrix * vertexPositionModelSpace;"
+  , fragmentShaderMain = "fragmentColor = vec4(1,1,1,1);"
   }
-  """
 
-sparkleFragmentSrc =
-  """#version 430\r\n
-  out vec4 fragmentColor;
-  in float opacity;
-  void main() {
-    fragmentColor = vec4(1,1,1,0.1);
-    fragmentColor = vec4(1,1,1,opacity);
+screenOverlaySrc = genShader $ GraphicsShaderGenerator
+  { uniforms = ["sampler2D base_texture"]
+  , buffers = []
+  , vertexData = ["vec2 vertexPosition"]
+  , interpolatedData = ["vec2 fragment_uv"]
+  , outputData = ["vec4 fragmentColor"]
+  , vertexShaderMain = """
+        gl_Position = vec4(vertexPosition,0,1);
+        fragment_uv = (vertexPosition + 1)/2;
+      """
+  , fragmentShaderMain = "fragmentColor = texture(base_texture,fragment_uv);"
   }
-  """
+
+raster2dSrc = genShader $ GraphicsShaderGenerator
+  { uniforms = ["vec4 color"]
+  , buffers = []
+  , vertexData = ["vec2 vertexPosition"]
+  , interpolatedData = []
+  , outputData = ["vec4 fragmentColor"]
+  , vertexShaderMain = "gl_Position = vec4(vertexPosition,0,1);"
+  , fragmentShaderMain = "fragmentColor = color;"
+  }
+
+pictureSrc = genShader $ GraphicsShaderGenerator
+  { uniforms = [ "mat4 modelToProjectionMatrix", "float aspectRatio", "sampler2D base_texture" ]
+  , buffers = []
+  , vertexData = [ "vec4 vertexPositionModelSpace", "vec2 vertex_uv" ]
+  , interpolatedData =  ["vec2 fragment_uv"]
+  , outputData = ["vec4 fragmentColor"]
+  , vertexShaderMain = """
+        mat4 scaler = mat4 (
+          aspectRatio,0,0,0,
+          0,1,0,0,
+          0,0,1,0,
+          0,0,0,1
+        );
+        gl_Position = modelToProjectionMatrix * scaler * vertexPositionModelSpace;
+        fragment_uv = vertex_uv;
+      """
+  , fragmentShaderMain = "fragmentColor = texture(base_texture,fragment_uv);"
+  }
+
+--- COMPUTE SHADERS ------------------------------------------------------------
 
 lorenzComputeSrc =
   """#version 430\r\n
@@ -916,14 +1003,11 @@ lorenzComputeSrc =
   """
 
 aizawaComputeSrc =
-  """#version 430
-  layout(local_size_x = 256) in;
-
+  """#version 430\r\n
+  layout(local_size_x=256) in;
   layout(std430, binding = 0) buffer InPos  { vec4 inPos[];  };
   layout(std430, binding = 1) buffer OutPos { vec4 outPos[]; };
-
   uniform uint  N;
-
   vec3 F(vec3 X) {
     float a=0.95;float b=0.7;float c=0.6; float d=3.5; float e=0.25; float f=0.1;
     float x = X.x, y = X.y, z = X.z;
@@ -934,7 +1018,6 @@ aizawaComputeSrc =
       c + a*z - (z*z*z)/3 - r2*(1+e*z) + f*z*x*x*x
     );
   }
-
   void main() {
     uint i = gl_GlobalInvocationID.x;
     if (i >= N) return;
@@ -948,104 +1031,6 @@ aizawaComputeSrc =
       x = x + (dt/6.0)*(k1 + 2.0*k2 + 2.0*k3 + k4);
     }
     outPos[i] = vec4(x, 1.0);
-  }
-  """
-
---- BASIC POSITION SHADER ------------------------------------------------------
-
-type PositionVertex = Vec 4
-
-positionVertexSrc =
-  """#version 430\r\n
-  uniform mat4 modelToProjectionMatrix;
-  in layout(location=0) vec4 vertexPositionModelSpace;
-  void main() {
-    gl_Position = modelToProjectionMatrix * vertexPositionModelSpace;
-  }
-  """
-
-positionFragmentSrc =
-  """#version 430\r\n
-  out vec4 fragmentColor;
-  void main() {
-    fragmentColor = vec4(1,1,1,1);
-  }
-  """
-
-
---- SCREEN OVERLAY SHADER ------------------------------------------------------
-
-screenOverlayVertexSrc =
-  """#version 430\r\n
-  in layout(location=0) vec2 vertexPosition;
-  out vec2 fragment_uv;
-  void main() {
-    gl_Position = vec4(vertexPosition,0,1);
-    fragment_uv = (vertexPosition + 1)/2;
-  }
-  """
-  
-
-screenOverlayFragmentSrc =
-  """#version 430\r\n
-  uniform sampler2D base_texture;
-  in vec2 fragment_uv;
-  out vec4 fragmentColor;
-  void main() {
-    fragmentColor = texture(base_texture,fragment_uv);
-  }
-  """
-
-
---- 2D RASTER SHADER -----------------------------------------------------------
-
-raster2dVertexSrc =
-  """#version 430\r\n
-  in layout(location=0) vec2 vertexPosition;
-  void main() {
-    gl_Position = vec4(vertexPosition,0,1);
-  }
-  """
-
-raster2dFragmentSrc =
-  """#version 430\r\n
-  uniform vec4 color;
-  out vec4 fragmentColor;
-  void main() {
-    fragmentColor = color;
-  }
-  """
-
---- PICTURE FRAME SHADER -------------------------------------------------------
-
-type PictureVertex = Vec 4
-
-pictureVertexSrc =
-  """#version 430\r\n
-  uniform mat4 modelToProjectionMatrix;
-  uniform float aspectRatio;
-  in layout(location=0) vec4 vertexPositionModelSpace;
-  in layout(location=1) vec2 vertex_uv;
-  out vec2 fragment_uv;
-  void main() {
-    mat4 scaler = mat4 (
-      aspectRatio,0,0,0,
-      0,1,0,0,
-      0,0,1,0,
-      0,0,0,1
-    );
-    gl_Position = modelToProjectionMatrix * scaler * vertexPositionModelSpace;
-    fragment_uv = vertex_uv;
-  }
-  """
-
-pictureFragmentSrc =
-  """#version 430\r\n
-  uniform sampler2D base_texture;
-  in vec2 fragment_uv;
-  out vec4 fragmentColor;
-  void main() {
-    fragmentColor = texture(base_texture,fragment_uv);
   }
   """
 
@@ -1110,21 +1095,20 @@ main = do
   GL.glEnable GL.GL_DEPTH_TEST
   GL.glEnable GL.GL_CULL_FACE
   -- GL.glPolygonMode GL.GL_FRONT_AND_BACK GL.GL_LINE
-   
 
   --- CONFIGURE SHADERS --------------------------------------------------------
 
   lorenzComputeShader <- initComputeShader lorenzComputeSrc
   aizawaComputeShader <- initComputeShader aizawaComputeSrc
 
-  basicShader <- initShader coloredNormalVertexSrc coloredNormalFragmentSrc
-  sparkleShader <- initShader sparkleVertexSrc sparkleFragmentSrc
-  textureShader <- initShader texturedSkeletonVertexSrc texturedSkeletonFragmentSrc
-  skellyShader <- initShader positionVertexSrc positionFragmentSrc
-  pictureShader <- initShader pictureVertexSrc pictureFragmentSrc
-  raster2dShader <- initShader raster2dVertexSrc raster2dFragmentSrc
-  screenOverlayShader <- initShader screenOverlayVertexSrc screenOverlayFragmentSrc
-  uniformColorShader <- initShader uniformColorVertexSrc uniformColorFragmentSrc
+  basicShader <- initGraphicsShader coloredNormalSrc
+  sparkleShader <- initGraphicsShader sparkleSrc
+  textureShader <- initGraphicsShader texturedSkeletonSrc
+  skellyShader <- initGraphicsShader positionSrc
+  pictureShader <- initGraphicsShader pictureSrc
+  raster2dShader <- initGraphicsShader raster2dSrc
+  screenOverlayShader <- initGraphicsShader screenOverlaySrc
+  uniformColorShader <- initGraphicsShader uniformColorSrc
 
   --- LOAD OBJECTS -------------------------------------------------------------
 
@@ -1144,6 +1128,8 @@ main = do
     let filename = "resources/Zigzagoon/Zigzagoon.SMD"
     readFile filename >>= either (error . show) (pure . smdscale 0.03) . MP.parse pSMD filename
 
+  let zigzagoonRefPose:_ = skeleton zigzagoon
+
   ziganim <- do
     let filename = "resources/Zigzagoon/anims/Bounce.smd"
     readFile filename >>= either (error . show) (pure . smdscale 0.03) . MP.parse pSMD filename
@@ -1158,7 +1144,6 @@ main = do
         ]
 
   drawScreenOverlay <- genBuffer [(2,1,0)::(Int,Int,Int),(3,1,2)] [v2 1 1, v2 1 (-1), v2 (-1) 1, v2 (-1) (-1)]
-
 
   drawCircle <- let numPoints = 100 in
      genBuffer
@@ -1308,39 +1293,51 @@ main = do
         GL.glClear GL.GL_DEPTH_BUFFER_BIT
 
         let aspectRatio = fromIntegral (windowWidth appState) / fromIntegral (windowHeight appState)
+        let cameraPosition3 = affineTo3d (cameraPosition appState) 
         let cameraViewDirection = rotateAround up (cameraYaw appState) (rotateAround east (cameraPitch appState) (extend north 1))
-        let worldToView = worldToViewMatrix (cameraPosition appState . weaken) (cameraViewDirection . weaken)
+        let cameraViewDirection3 = affineTo3d cameraViewDirection
+        let worldToView = worldToViewMatrix cameraPosition3 cameraViewDirection3
         let projectionMatrix = projection 60 aspectRatio 0.1 50
-        let toScreenspace t = projectionMatrix . worldToView . t
-        let drawTriangulation shader renderObj transform = do
-              setShaderUniform shader "modelToWorldTransformMatrix" transform
-              setShaderUniform shader "modelToProjectionMatrix" (toScreenspace transform)
-              renderObj
+        let ambientLight = v4 0.3 0.3 0.3 1
+        let specularity :: Int = 64
         let lightPosition = 3*north + 2*east
+        let eyePosition = affineTo3d (cameraPosition appState)
 
         GL.glUseProgram basicShader
-        setShaderUniform basicShader "ambientLight" (v4 0.3 0.3 0.3 1)
-        setShaderUniform basicShader "specularity" (64 :: Int)
+        setShaderUniform basicShader "ambientLight" ambientLight
+        setShaderUniform basicShader "specularity" specularity
         setShaderUniform basicShader "lightPosition" lightPosition
-        setShaderUniform basicShader "eyePosition" (cameraPosition appState . weaken)
+        setShaderUniform basicShader "eyePosition" eyePosition
 
-        drawTriangulation basicShader renderCube (translate (north + 4*west) . rotateAround (v3 1 1 0) 45)
-        drawTriangulation basicShader renderCube (translate (south + 4*west) . rotateAround (v3 1 1 1) 45)
-        drawTriangulation basicShader renderPyramid (translate (2*west))
-        drawTriangulation basicShader renderPlane (translate (2*down + 4*west))
-        drawTriangulation basicShader renderTeapot (translate (3*north + up + 8*west))
+        let transform = translate (north + 4*west) . rotateAround (v3 1 1 0) 45
+        setShaderUniform basicShader "modelToWorldTransformMatrix" transform
+        setShaderUniform basicShader "modelToProjectionMatrix" (projectionMatrix . worldToView . transform)
+        renderCube
 
+        let transform = translate (south + 4*west) . rotateAround (v3 1 1 1) 45
+        setShaderUniform basicShader "modelToWorldTransformMatrix" transform
+        setShaderUniform basicShader "modelToProjectionMatrix" (projectionMatrix . worldToView . transform)
+        renderCube
 
+        let transform = translate (2*west)
+        setShaderUniform basicShader "modelToWorldTransformMatrix" transform
+        setShaderUniform basicShader "modelToProjectionMatrix" (projectionMatrix . worldToView . transform)
+        renderPyramid
 
-        let cameraViewDirection3 = affineTo3d cameraViewDirection
-        let cameraPosition3 = affineTo3d (cameraPosition appState) 
+        let transform = translate (2*down + 4*west)
+        setShaderUniform basicShader "modelToWorldTransformMatrix" transform
+        setShaderUniform basicShader "modelToProjectionMatrix" (projectionMatrix . worldToView . transform)
+        renderPlane
+
+        let transform = translate (3*north + up + 8*west)
+        setShaderUniform basicShader "modelToWorldTransformMatrix" transform
+        setShaderUniform basicShader "modelToProjectionMatrix" (projectionMatrix . worldToView . transform)
+        renderTeapot
 
         let hitboxCenter = 4 * up
-
         let rayHit =
              let positionMinusCamera = hitboxCenter - cameraPosition3
              in 1 > magnitude (project positionMinusCamera cameraViewDirection3 - positionMinusCamera)
-
         let color = case (lightOn appState, buttonDown appState, rayHit) of
              (True,True,True) -> v4 0.3 0.9 0.3 1
              (True,True,False) -> v4 0.1 0.7 0.1 1
@@ -1350,11 +1347,10 @@ main = do
              (False,True,False) -> v4 0.7 0.1 0.1 1
              (False,False,True) -> v4 0.8 0.1 0.1 1
              (False,False,False) -> v4 0.7 0.1 0.1 1
-
         let toggleLight = buttonDown prevAppState && not (buttonDown appState) && rayHit
 
         when toggleLight $ do
-          let lightCommand =  if lightOn prevAppState then "off" else "on"
+          let lightCommand = if lightOn prevAppState then "off" else "on"
           let request =
                 Network.HTTP.Simple.setRequestMethod "POST"
                 $ Network.HTTP.Simple.setRequestBodyJSON (Data.Aeson.object ["entity_id" Data.Aeson..= ("light.l" :: String)])
@@ -1363,50 +1359,45 @@ main = do
           Control.Concurrent.Async.async (Network.HTTP.Simple.httpNoBody request)
           putStrLn ("turning light " ++ lightCommand)
           
-
-        
         GL.glUseProgram uniformColorShader
         setShaderUniform uniformColorShader "color" color
-        setShaderUniform uniformColorShader "modelToProjectionMatrix" (toScreenspace (translate hitboxCenter))
+        setShaderUniform uniformColorShader "modelToProjectionMatrix" (projectionMatrix . worldToView . translate hitboxCenter)
         renderIcosahedron
 
         let zigTransform = translate (2*south + 2*down + west) . rotateAround up 45 . rotateAround south 90
-
+        let zigpose = transformToMat <$> pose zigzagoon zigzagoonRefPose animState
         GL.glUseProgram textureShader
-
-        let zigpose = transformToMat <$> pose zigzagoon (head (skeleton zigzagoon)) animState
         bonesloc <- Foreign.C.String.withCString "bones" (GL.glGetUniformLocation textureShader)
         Foreign.withArray zigpose (GL.glUniformMatrix4fv bonesloc (fromIntegral $ length zigpose) 1 . Foreign.castPtr)
-        setShaderUniform textureShader "ambientLight" (v4 0.3 0.3 0.3 1)
+        setShaderUniform textureShader "ambientLight" ambientLight
         setShaderUniform textureShader "lightPosition" lightPosition
-        setShaderUniform textureShader "eyePosition" (cameraPosition appState . weaken)
+        setShaderUniform textureShader "eyePosition" eyePosition
         mapM_
            (\(textureID,zigMetadata) -> do
-                GL.glActiveTexture GL.GL_TEXTURE0
-                GL.glBindTexture GL.GL_TEXTURE_2D textureID
-                Foreign.C.String.withCString "texture" (GL.glGetUniformLocation textureShader)
-                     >>= flip GL.glUniform1i 0
-                drawTriangulation textureShader zigMetadata zigTransform)
+              GL.glActiveTexture GL.GL_TEXTURE0
+              GL.glBindTexture GL.GL_TEXTURE_2D textureID
+              Foreign.C.String.withCString "texture" (GL.glGetUniformLocation textureShader) >>= flip GL.glUniform1i 0
+              setShaderUniform textureShader "modelToWorldTransformMatrix" zigTransform
+              setShaderUniform textureShader "modelToProjectionMatrix" (projectionMatrix . worldToView . zigTransform)
+              zigMetadata)
            matMap
 
-
         let portraitTransform = translate (12*south + 2*up) . rotateAround down 90 . rotateAround south 90
+        GL.glUseProgram pictureShader
         GL.glActiveTexture GL.GL_TEXTURE0
         GL.glBindTexture GL.GL_TEXTURE_2D (fst tour)
         Foreign.C.String.withCString "texture" (GL.glGetUniformLocation pictureShader) >>= flip GL.glUniform1i 0
-        GL.glUseProgram pictureShader
         setShaderUniform pictureShader "aspectRatio" (snd tour :: Float)
-        setShaderUniform pictureShader "modelToProjectionMatrix" (toScreenspace portraitTransform)
+        setShaderUniform pictureShader "modelToProjectionMatrix" (projectionMatrix . worldToView . portraitTransform)
         renderPictureFrame
         
-
         GL.glUseProgram raster2dShader
         setShaderUniform raster2dShader "color" (v4 1 1 1 1)
         drawCircle
 
         -- GL.glClear GL.GL_DEPTH_BUFFER_BIT
         -- GL.glUseProgram skellyShader
-        -- setShaderUniform skellyShader "modelToProjectionMatrix" (toScreenspace zigTransform)
+        -- setShaderUniform skellyShader "modelToProjectionMatrix" (projectionMatrix . worldToView . zigTransform)
         -- GL.glBindVertexArray (vertexArrayID skelly)
         -- GL.glDrawElements GL.GL_LINES (indexCount skelly) GL.GL_UNSIGNED_SHORT Foreign.nullPtr
 
@@ -1414,11 +1405,11 @@ main = do
         GL.glBlendFunc GL.GL_SRC_ALPHA GL.GL_ONE_MINUS_SRC_ALPHA
         GL.glDepthMask GL.GL_FALSE
         GL.glEnable GL.GL_PROGRAM_POINT_SIZE
-        GL.glUseProgram sparkleShader
         let pointCloudTransform = translate (5*west + north*14 + up*2) . (*v4 0.1 0.1 0.1 1)
         GL.glBindVertexArray emptyVao
-        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 1 (lorenzParticleBufferOut appState)
-        setShaderUniform sparkleShader "modelToProjectionMatrix" (toScreenspace pointCloudTransform)
+        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 0 (lorenzParticleBufferOut appState)
+        GL.glUseProgram sparkleShader
+        setShaderUniform sparkleShader "modelToProjectionMatrix" (projectionMatrix . worldToView . pointCloudTransform)
         GL.glDrawArrays GL.GL_POINTS 0 (fromIntegral lorenzParticleCount)
         GL.glDepthMask GL.GL_TRUE
         GL.glDisable GL.GL_BLEND
@@ -1427,11 +1418,11 @@ main = do
         GL.glBlendFunc GL.GL_SRC_ALPHA GL.GL_ONE_MINUS_SRC_ALPHA
         GL.glDepthMask GL.GL_FALSE
         GL.glEnable GL.GL_PROGRAM_POINT_SIZE
-        GL.glUseProgram sparkleShader
         let pointCloudTransform = translate (12*east + north*14 + up*2) . (*v4 0.4 0.4 0.4 1)
         GL.glBindVertexArray emptyVao
-        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 1 (aizawaParticleBufferOut appState)
-        setShaderUniform sparkleShader "modelToProjectionMatrix" (toScreenspace pointCloudTransform)
+        GL.glBindBufferBase GL.GL_SHADER_STORAGE_BUFFER 0 (aizawaParticleBufferOut appState)
+        GL.glUseProgram sparkleShader
+        setShaderUniform sparkleShader "modelToProjectionMatrix" (projectionMatrix . worldToView . pointCloudTransform)
         GL.glDrawArrays GL.GL_POINTS 0 (fromIntegral $ length initialPositionsAizawa)
         GL.glDepthMask GL.GL_TRUE
         GL.glDisable GL.GL_BLEND
@@ -1443,8 +1434,8 @@ main = do
         GL.glEnable GL.GL_PROGRAM_POINT_SIZE
         GL.glActiveTexture GL.GL_TEXTURE0
         GL.glBindTexture GL.GL_TEXTURE_2D fixedsysTexture
-        Foreign.C.String.withCString "texture" (GL.glGetUniformLocation screenOverlayShader) >>= flip GL.glUniform1i 0
         GL.glUseProgram screenOverlayShader
+        Foreign.C.String.withCString "texture" (GL.glGetUniformLocation screenOverlayShader) >>= flip GL.glUniform1i 0
         drawScreenOverlay
         GL.glDepthMask GL.GL_TRUE
         GL.glDisable GL.GL_BLEND
