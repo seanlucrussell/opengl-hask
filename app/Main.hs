@@ -33,6 +33,7 @@ import qualified Data.String
 import qualified Graphics.Rasterific
 import qualified Graphics.Rasterific.Texture
 import qualified Graphics.Text.TrueType
+import qualified Graphics.Text.TrueType.Internal
 
 
 
@@ -331,6 +332,54 @@ icosahedron =
 
 -- ugh maybe the correct way to do this is actually just to render to the full screen w/ transparency. if we render with screen width and screen height instead of the calculated width and height here we can at least put them in the right location. then we can just grab the bounding box w/o making a whole fuss of it. really don't like this idea but it might be the simplest way to implement font rendering
 
+-- rasteriffic hardcodes DPI to 96 in random places so i'm going to leave it like this
+dpi = 96
+
+textToTexture font size text =
+  let bgColor = Codec.Picture.PixelRGBA8 0 0 0 0
+      fgColor = Codec.Picture.PixelRGBA8 255 255 255 255
+      boundingBox = Graphics.Text.TrueType.stringBoundingBox font dpi (Graphics.Text.TrueType.PointSize size) text
+      width = round (Graphics.Text.TrueType._xMax boundingBox - Graphics.Text.TrueType._xMin boundingBox)
+      height = round (Graphics.Text.TrueType._yMax boundingBox - Graphics.Text.TrueType._yMin boundingBox)
+  in
+   Graphics.Rasterific.renderDrawing width height bgColor $
+   Graphics.Rasterific.withTexture (Graphics.Rasterific.Texture.uniformTexture fgColor) $
+   -- bounding box has y start at bottom while rasteriffic has y start at top, origin at 0 0
+   Graphics.Rasterific.printTextAt
+      font
+      (Graphics.Rasterific.PointSize size)
+      (Graphics.Rasterific.V2
+         (-Graphics.Text.TrueType._xMin boundingBox)
+         (Graphics.Text.TrueType._yMax boundingBox))
+      text
+
+fontAscentDescent font size = do
+     -- ascender and descender are stored in 2s complement
+     -- to convert to pixel values, use this formula
+     --   pixels = (ascender * pointSize * dpi) / (unitsPerEm * 72)
+     -- 72 is just a constant. points are 1/72 of an inch.
+     -- assuming that descent is always negative here. not sure this is a safe assumption. we will see what breaks!
+     fh <- maybe (fail "can't load font metrics") pure (Graphics.Text.TrueType.Internal._fontHeader font)
+     hh <- maybe (fail "can't load font metrics") pure (Graphics.Text.TrueType.Internal._fontHorizontalHeader font)
+     let Graphics.Text.TrueType.Internal.FWord ascent = Graphics.Text.TrueType.Internal._hheaAscent hh
+     let Graphics.Text.TrueType.Internal.FWord descent = Graphics.Text.TrueType.Internal._hheaDescent hh
+     let unitsPerEm = Graphics.Text.TrueType.Internal._fUnitsPerEm fh
+     pure
+      ( (fromIntegral     ascent * size * fromIntegral dpi) / (fromIntegral unitsPerEm * 72)
+      , (fromIntegral (-descent) * size * fromIntegral dpi) / (fromIntegral unitsPerEm * 72))
+
+
+-- boundBoxSize :: IO (Float,Float,Float)
+boundBoxSize font size text =
+  let bgColor = Codec.Picture.PixelRGBA8 255 255 0 255
+      fgColor = Codec.Picture.PixelRGBA8 0 0 0 255
+      boundingBox = Graphics.Text.TrueType.stringBoundingBox font dpi (Graphics.Text.TrueType.PointSize size) text
+      width =  (Graphics.Text.TrueType._xMax boundingBox - Graphics.Text.TrueType._xMin boundingBox)
+      height = (Graphics.Text.TrueType._yMax boundingBox - Graphics.Text.TrueType._yMin boundingBox)
+  in (Graphics.Text.TrueType._yMax boundingBox-Graphics.Text.TrueType._baselineHeight boundingBox, width, height)
+
+
+
 -- loadFixedsys :: IO (String -> Float -> Codec.Picture.Image Codec.Picture.PixelRGBA8)
 -- loadFixedsys =
 --  -- Graphics.Text.TrueType.loadFontFile "resources/times.ttf" >>=
@@ -339,44 +388,17 @@ icosahedron =
 --       (fail . show)
 --       (\font ->
 --         pure (\text size ->
---           let bgColor = Codec.Picture.PixelRGBA8 255 255 0 255
---               fgColor = Codec.Picture.PixelRGBA8 0 0 0 255
---               dpi = 96 -- IS THIS RELEVANT AT ALL? YES! all bounding box things scale linearly w/ dpi
---               boundingBox = Graphics.Text.TrueType.stringBoundingBox font dpi (Graphics.Text.TrueType.PointSize size) text
---               width = round (Graphics.Text.TrueType._xMax boundingBox - Graphics.Text.TrueType._xMin boundingBox)
---               height = round (Graphics.Text.TrueType._yMax boundingBox - Graphics.Text.TrueType._yMin boundingBox)
+--           -- let bgColor = Codec.Picture.PixelRGBA8 255 255 0 255
+--           let bgColor = Codec.Picture.PixelRGBA8 0 0 0 0
+--               fgColor = Codec.Picture.PixelRGBA8 255 255 255 255
 --           in
---            Graphics.Rasterific.renderDrawing width height bgColor $
+--            Graphics.Rasterific.renderDrawing 800 600 bgColor $
 --            Graphics.Rasterific.withTexture (Graphics.Rasterific.Texture.uniformTexture fgColor) $
---            -- bounding box has y start at bottom while rasteriffic has y start at top, origin at 0 0
 --            Graphics.Rasterific.printTextAt
 --               font
 --               (Graphics.Rasterific.PointSize size)
---               (Graphics.Rasterific.V2
---                  (-Graphics.Text.TrueType._xMin boundingBox)
---                  (Graphics.Text.TrueType._yMax boundingBox))
+--               (Graphics.Rasterific.V2 60 200)
 --               text))
-
-
-loadFixedsys :: IO (String -> Float -> Codec.Picture.Image Codec.Picture.PixelRGBA8)
-loadFixedsys =
- -- Graphics.Text.TrueType.loadFontFile "resources/times.ttf" >>=
- Graphics.Text.TrueType.loadFontFile "resources/fixedsys.ttf" >>=
-   either
-      (fail . show)
-      (\font ->
-        pure (\text size ->
-          -- let bgColor = Codec.Picture.PixelRGBA8 255 255 0 255
-          let bgColor = Codec.Picture.PixelRGBA8 0 0 0 0
-              fgColor = Codec.Picture.PixelRGBA8 255 255 255 255
-          in
-           Graphics.Rasterific.renderDrawing 800 600 bgColor $
-           Graphics.Rasterific.withTexture (Graphics.Rasterific.Texture.uniformTexture fgColor) $
-           Graphics.Rasterific.printTextAt
-              font
-              (Graphics.Rasterific.PointSize size)
-              (Graphics.Rasterific.V2 60 200)
-              text))
 
 loadTexture :: Codec.Picture.Image Codec.Picture.PixelRGBA8 -> IO GL.GLuint
 loadTexture img = do
@@ -933,6 +955,29 @@ positionSrc = genShader $ GraphicsShaderGenerator
   , fragmentShaderMain = "fragmentColor = vec4(1,1,1,1);"
   }
 
+coloredBoxSrc = genShader $ GraphicsShaderGenerator
+  { uniforms = ["float width", "float height", "vec4 color", "vec2 center"] -- width and height are % of screen, center is point on screen
+  , buffers = []
+  , vertexData = ["vec2 vertexPosition"] -- presumed to span from -1 to 1, x and y
+  , interpolatedData = []
+  , outputData = ["vec4 fragmentColor"]
+  , vertexShaderMain = "gl_Position = vec4(center.x + vertexPosition.x * width, center.y + vertexPosition.y * height, 0, 1);"
+  , fragmentShaderMain = "fragmentColor = color;"
+  }
+
+stampSrc = genShader $ GraphicsShaderGenerator
+  { uniforms = ["sampler2D base_texture", "float width", "float height", "vec2 center"] -- width and height are % of screen, center is point on screen
+  , buffers = []
+  , vertexData = ["vec2 vertexPosition"] -- presumed to span from -1 to 1, x and y
+  , interpolatedData = ["vec2 fragment_uv"]
+  , outputData = ["vec4 fragmentColor"]
+  , vertexShaderMain = """
+        gl_Position = vec4(center.x + vertexPosition.x * width, center.y + vertexPosition.y * height, 0, 1);
+        fragment_uv = (vertexPosition + 1)/2;
+      """
+  , fragmentShaderMain = "fragmentColor = texture(base_texture,fragment_uv);"
+  }
+
 screenOverlaySrc = genShader $ GraphicsShaderGenerator
   { uniforms = ["sampler2D base_texture"]
   , buffers = []
@@ -1109,6 +1154,8 @@ main = do
   raster2dShader <- initGraphicsShader raster2dSrc
   screenOverlayShader <- initGraphicsShader screenOverlaySrc
   uniformColorShader <- initGraphicsShader uniformColorSrc
+  coloredBoxShader <- initGraphicsShader coloredBoxSrc
+  stampShader <- initGraphicsShader stampSrc
 
   --- LOAD OBJECTS -------------------------------------------------------------
 
@@ -1144,6 +1191,8 @@ main = do
         ]
 
   drawScreenOverlay <- genBuffer [(2,1,0)::(Int,Int,Int),(3,1,2)] [v2 1 1, v2 1 (-1), v2 (-1) 1, v2 (-1) (-1)]
+  
+  stampTest <- genBuffer [(2,1,0)::(Int,Int,Int),(3,1,2)] [v2 1 1, v2 1 (-1), v2 (-1) 1, v2 (-1) (-1)]
 
   drawCircle <- let numPoints = 100 in
      genBuffer
@@ -1173,9 +1222,19 @@ main = do
 
   tour <- readImg "resources/tour-of-the-universe-mccall-studios-1.jpg"
 
+  fixedsys <- Graphics.Text.TrueType.loadFontFile "resources/fixedsys.ttf" >>= either (fail.show) pure 
+  times <- Graphics.Text.TrueType.loadFontFile "resources/times.ttf" >>= either (fail.show) pure 
+  let font = fixedsys
+  let pointSize = 48
+  let textToRender = "testing"
+  fixedsysExtrema <- fontAscentDescent font pointSize
+  print fixedsysExtrema
+  let fixedsysBounds = boundBoxSize font pointSize textToRender
+  print fixedsysBounds
+  testingText <- loadTexture $ textToTexture font pointSize textToRender
+
 
   fixedsysTexture <- do
-    fixedsys <- Graphics.Text.TrueType.loadFontFile "resources/fixedsys.ttf" >>= either (fail.show) pure 
     let bgColor = Codec.Picture.PixelRGBA8 0 0 0 0
         fgColor = Codec.Picture.PixelRGBA8 255 255 255 255
         size = 48
@@ -1183,11 +1242,11 @@ main = do
         height = 600
     let fontText = Graphics.Rasterific.renderDrawing 800 600 bgColor $
                    Graphics.Rasterific.withTexture (Graphics.Rasterific.Texture.uniformTexture fgColor) $ do
-                     Graphics.Rasterific.printTextAt
-                        fixedsys
-                        (Graphics.Rasterific.PointSize size)
-                        (Graphics.Rasterific.V2 60 200)
-                        "testing"
+                     -- Graphics.Rasterific.printTextAt
+                     --    fixedsys
+                     --    (Graphics.Rasterific.PointSize size)
+                     --    (Graphics.Rasterific.V2 60 200)
+                     --    "testing"
                      Graphics.Rasterific.printTextAt
                         fixedsys
                         (Graphics.Rasterific.PointSize size)
@@ -1427,6 +1486,74 @@ main = do
         GL.glDepthMask GL.GL_TRUE
         GL.glDisable GL.GL_BLEND
 
+        
+        let pixelCoordToWindowLoc (v :: Vec 2) =
+              v2
+                (2 * v x / fromIntegral (windowWidth appState) - 1)
+                (1 - 2 * v y / fromIntegral (windowHeight appState))
+
+        let (aboveBaseline, textWidth, textHeight) = fixedsysBounds
+        let baselineOffsetFromCenter = aboveBaseline - textHeight/2
+        let belowBaseline = textHeight - aboveBaseline
+
+        let (ascent,descent) = fixedsysExtrema
+
+        GL.glEnable GL.GL_BLEND
+        GL.glBlendFunc GL.GL_SRC_ALPHA GL.GL_ONE_MINUS_SRC_ALPHA
+        GL.glDepthMask GL.GL_FALSE
+        GL.glEnable GL.GL_PROGRAM_POINT_SIZE
+        GL.glUseProgram coloredBoxShader
+        setShaderUniform coloredBoxShader "width" (textWidth / fromIntegral (windowWidth appState) :: Float)
+        setShaderUniform coloredBoxShader "height" ((ascent+descent) / fromIntegral (windowHeight appState) :: Float)
+        setShaderUniform coloredBoxShader "color" (v4 1 0 0 1)
+        setShaderUniform coloredBoxShader "center" (pixelCoordToWindowLoc $ v2 200 (200+(descent-ascent)/2+baselineOffsetFromCenter))
+        stampTest
+        GL.glDepthMask GL.GL_TRUE
+        GL.glDisable GL.GL_BLEND
+
+        
+        GL.glEnable GL.GL_BLEND
+        GL.glBlendFunc GL.GL_SRC_ALPHA GL.GL_ONE_MINUS_SRC_ALPHA
+        GL.glDepthMask GL.GL_FALSE
+        GL.glEnable GL.GL_PROGRAM_POINT_SIZE
+        GL.glUseProgram coloredBoxShader
+        setShaderUniform coloredBoxShader "width" (textWidth / fromIntegral (windowWidth appState) :: Float)
+        setShaderUniform coloredBoxShader "height" (aboveBaseline / fromIntegral (windowHeight appState) :: Float)
+        setShaderUniform coloredBoxShader "color" (v4 0 1 0 1)
+        setShaderUniform coloredBoxShader "center" (pixelCoordToWindowLoc $ v2 200 (200-aboveBaseline/2+baselineOffsetFromCenter))
+        stampTest
+        GL.glDepthMask GL.GL_TRUE
+        GL.glDisable GL.GL_BLEND
+
+        
+        GL.glEnable GL.GL_BLEND
+        GL.glBlendFunc GL.GL_SRC_ALPHA GL.GL_ONE_MINUS_SRC_ALPHA
+        GL.glDepthMask GL.GL_FALSE
+        GL.glEnable GL.GL_PROGRAM_POINT_SIZE
+        GL.glUseProgram coloredBoxShader
+        setShaderUniform coloredBoxShader "width" (textWidth / fromIntegral (windowWidth appState) :: Float)
+        setShaderUniform coloredBoxShader "height" (belowBaseline / fromIntegral (windowHeight appState) :: Float)
+        setShaderUniform coloredBoxShader "color" (v4 0 0 1 1)
+        setShaderUniform coloredBoxShader "center" (pixelCoordToWindowLoc $ v2 200 (200+belowBaseline/2+baselineOffsetFromCenter))
+        stampTest
+        GL.glDepthMask GL.GL_TRUE
+        GL.glDisable GL.GL_BLEND
+
+        
+        GL.glEnable GL.GL_BLEND
+        GL.glBlendFunc GL.GL_SRC_ALPHA GL.GL_ONE_MINUS_SRC_ALPHA
+        GL.glDepthMask GL.GL_FALSE
+        GL.glEnable GL.GL_PROGRAM_POINT_SIZE
+        GL.glActiveTexture GL.GL_TEXTURE0
+        GL.glBindTexture GL.GL_TEXTURE_2D testingText
+        GL.glUseProgram stampShader
+        setShaderUniform stampShader "width" (textWidth / fromIntegral (windowWidth appState) :: Float)
+        setShaderUniform stampShader "height" (textHeight / fromIntegral (windowHeight appState) :: Float)
+        setShaderUniform stampShader "center" (pixelCoordToWindowLoc $ v2 200 200)
+        Foreign.C.String.withCString "texture" (GL.glGetUniformLocation stampShader) >>= flip GL.glUniform1i 0
+        stampTest
+        GL.glDepthMask GL.GL_TRUE
+        GL.glDisable GL.GL_BLEND
 
         GL.glEnable GL.GL_BLEND
         GL.glBlendFunc GL.GL_SRC_ALPHA GL.GL_ONE_MINUS_SRC_ALPHA
