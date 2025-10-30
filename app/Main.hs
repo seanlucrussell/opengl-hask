@@ -919,7 +919,7 @@ clamp low high = max low . min high
 handleEvent event appState = case SDL.eventPayload event of
   SDL.WindowResizedEvent e -> 
     let SDL.V2 w h = SDL.windowResizedEventSize e
-    in appState { windowWidth = fromIntegral w, windowHeight = fromIntegral h}
+    in appState { windowDimensions = fromIntegral <$> a2 w h}
   SDL.KeyboardEvent e -> case SDL.keysymKeycode (SDL.keyboardEventKeysym e) of
     SDL.KeycodeQ -> appState { timeToQuit = timeToQuit appState || (SDL.keyboardEventKeyMotion e==SDL.Pressed)}
     _ -> appState
@@ -1310,8 +1310,8 @@ main = do
              . (if ks SDL.ScancodeR then moveUp else id)
              . (if ks SDL.ScancodeF then moveDown else id)
         let appState = positionTransform (foldr handleEvent prevAppState events)
-        when (windowWidth prevAppState /= windowWidth appState || windowHeight prevAppState /= windowHeight appState)
-          (GL.glViewport 0 0 (fromIntegral (windowWidth appState)) (fromIntegral (windowHeight appState)))
+        when (windowDimensions prevAppState x /= windowDimensions appState x || windowDimensions prevAppState y /= windowDimensions appState y)
+          (GL.glViewport 0 0 (round (windowDimensions appState x)) (round (windowDimensions appState y)))
         SDL.glSwapWindow window
 
         --- COMPUTE SHADER -----------------------------------------------------
@@ -1337,7 +1337,7 @@ main = do
         GL.glClear GL.GL_COLOR_BUFFER_BIT
         GL.glClear GL.GL_DEPTH_BUFFER_BIT
 
-        let aspectRatio = fromIntegral (windowWidth appState) / fromIntegral (windowHeight appState)
+        let aspectRatio = windowDimensions appState x / windowDimensions appState y
         let cameraPosition3 = affineTo3d (cameraPosition appState) 
         let cameraViewDirection = rotateAround up (cameraYaw appState) (rotateAround east (cameraPitch appState) (extend north 1))
         let cameraViewDirection3 = affineTo3d cameraViewDirection
@@ -1548,9 +1548,7 @@ main = do
         -- for now, calling in order does the trick
         
         let pixelCoordToWindowLoc (v :: Vec 2) =
-              v2
-                (2 * v x / fromIntegral (windowWidth appState) - 1)
-                (1 - 2 * v y / fromIntegral (windowHeight appState))
+              v2 (2 * v x / windowDimensions appState x - 1) (1 - 2 * v y / windowDimensions appState y)
 
         let (aboveBaseline, textWidth, textHeight) = fixedsysBounds
         let baselineOffsetFromCenter = aboveBaseline - textHeight/2
@@ -1559,7 +1557,7 @@ main = do
 
         let boxTransform
               = translate2d (pixelCoordToWindowLoc $ v2 200 (200+(descent-ascent)/2+baselineOffsetFromCenter))
-              . scale2d (v2 (textWidth / fromIntegral (windowWidth appState) :: Float) ((ascent+descent) / fromIntegral (windowHeight appState) :: Float))
+              . scale2d (v2 textWidth (ascent+descent) / windowDimensions appState)
         GL.glDepthMask GL.GL_FALSE
         GL.glUseProgram uniform2dShader
         setShaderUniform uniform2dShader "worldToScreen" boxTransform
@@ -1569,7 +1567,7 @@ main = do
 
         let boxTransform
               = translate2d (pixelCoordToWindowLoc $ v2 200 (200-aboveBaseline/2+baselineOffsetFromCenter))
-              . scale2d (v2 (textWidth / fromIntegral (windowWidth appState) :: Float)(aboveBaseline / fromIntegral (windowHeight appState) :: Float))
+              . scale2d (v2 textWidth aboveBaseline / windowDimensions appState)
         GL.glDepthMask GL.GL_FALSE
         GL.glUseProgram uniform2dShader
         setShaderUniform uniform2dShader "worldToScreen" boxTransform
@@ -1579,7 +1577,7 @@ main = do
 
         let boxTransform
               = translate2d (pixelCoordToWindowLoc $ v2 200 (200+belowBaseline/2+baselineOffsetFromCenter))
-              . scale2d (v2 (textWidth / fromIntegral (windowWidth appState) :: Float)(belowBaseline / fromIntegral (windowHeight appState) :: Float))
+              . scale2d (v2 textWidth belowBaseline / windowDimensions appState)
         GL.glDepthMask GL.GL_FALSE
         GL.glUseProgram uniform2dShader
         setShaderUniform uniform2dShader "worldToScreen" boxTransform
@@ -1594,8 +1592,8 @@ main = do
         GL.glActiveTexture GL.GL_TEXTURE0
         GL.glBindTexture GL.GL_TEXTURE_2D testingText
         GL.glUseProgram stampShader
-        setShaderUniform stampShader "width" (textWidth / fromIntegral (windowWidth appState) :: Float)
-        setShaderUniform stampShader "height" (textHeight / fromIntegral (windowHeight appState) :: Float)
+        setShaderUniform stampShader "width" (textWidth / windowDimensions appState x)
+        setShaderUniform stampShader "height" (textHeight / windowDimensions appState y)
         setShaderUniform stampShader "center" (pixelCoordToWindowLoc $ v2 200 200)
         Foreign.C.String.withCString "texture" (GL.glGetUniformLocation stampShader) >>= flip GL.glUniform1i 0
         stampTest
@@ -1620,8 +1618,7 @@ main = do
 
   let initialAppState = AppState
           { timeToQuit = False
-          , windowWidth = 800
-          , windowHeight = 600
+          , windowDimensions = v2 800 600
           , viewDirection = v4 0.98 (-0.15) (-0.11) 1
           , cameraYaw = 0
           , cameraPitch = 0
@@ -1646,8 +1643,7 @@ main = do
 
 data AppState = AppState
   { timeToQuit :: Bool
-  , windowWidth :: Int
-  , windowHeight :: Int
+  , windowDimensions :: Vec 2
   , viewDirection :: Vec 4
   , cameraPitch :: Float
   , cameraYaw :: Float
