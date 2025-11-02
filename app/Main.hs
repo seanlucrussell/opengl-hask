@@ -1,7 +1,7 @@
-{-# LANGUAGE OverloadedStrings,LinearTypes,ScopedTypeVariables,MultilineStrings,DataKinds,TypeOperators,FlexibleInstances,UndecidableInstances,TypeApplications,AllowAmbiguousTypes,GADTs,TypeFamilies,RankNTypes #-}
+{-# LANGUAGE OverloadedStrings,LinearTypes,ScopedTypeVariables,MultilineStrings,DataKinds,TypeOperators,FlexibleInstances,UndecidableInstances,TypeApplications,AllowAmbiguousTypes,GADTs,TypeFamilies,RankNTypes,DeriveGeneric #-}
 module Main where
 import           Control.Applicative
-import           Control.Monad (unless,when)
+import           Control.Monad (unless,when,ap)
 import           Data.Finite
 import           GHC.TypeNats
 import qualified System.Process
@@ -28,7 +28,7 @@ import qualified Network.HTTP.Simple
 import qualified Data.Aeson
 import qualified Control.Concurrent.Async
 import qualified Data.String
-
+import           GHC.Generics (Generic)
 
 import qualified Graphics.Rasterific
 import qualified Graphics.Rasterific.Texture
@@ -36,6 +36,26 @@ import qualified Graphics.Text.TrueType
 import qualified Graphics.Text.TrueType.Internal
 
 
+
+
+data PriceInfo
+  = PriceInfo
+  { date :: String
+  , open :: Float
+  , high :: Float
+  , low :: Float
+  , close :: Float
+  , volume :: Int
+  , adjOpen :: Float
+  , adjHigh :: Float
+  , adjLow :: Float
+  , adjClose :: Float
+  , adjVolume :: Int
+  , divCash :: Float
+  , splitFactor :: Float
+  } deriving (Show,Generic)
+
+instance Data.Aeson.FromJSON PriceInfo
 
 --- LINEAR ALGEBRA LIBRARY -----------------------------------------------------
 
@@ -427,6 +447,36 @@ loadTexture img = do
   GL.glTexParameteri GL.GL_TEXTURE_2D GL.GL_TEXTURE_MAG_FILTER (fromIntegral GL.GL_LINEAR)
   GL.glTexParameteri GL.GL_TEXTURE_2D GL.GL_TEXTURE_WRAP_S (fromIntegral GL.GL_REPEAT)
   GL.glTexParameteri GL.GL_TEXTURE_2D GL.GL_TEXTURE_WRAP_T (fromIntegral GL.GL_REPEAT)
+  GL.glGenerateMipmap GL.GL_TEXTURE_2D
+  pure textureID
+
+loadTextTexture :: Codec.Picture.Image Codec.Picture.PixelRGBA8 -> IO GL.GLuint
+loadTextTexture img = do
+  -- opengl textures start at the bottom left so gotta flip
+  let flippedY = Codec.Picture.generateImage
+        (\x y -> Codec.Picture.pixelAt img x (Codec.Picture.imageHeight img - 1 - y))
+        (Codec.Picture.imageWidth img) (Codec.Picture.imageHeight img)
+  textureID <- Foreign.alloca $ \textureIDPtr -> do
+      GL.glGenTextures 1 textureIDPtr
+      Foreign.peek textureIDPtr
+  GL.glBindTexture GL.GL_TEXTURE_2D textureID
+  Data.Vector.Storable.unsafeWith
+     (Codec.Picture.imageData flippedY)
+     (GL.glTexImage2D
+        GL.GL_TEXTURE_2D
+        0
+        (fromIntegral GL.GL_SRGB8_ALPHA8)
+        (fromIntegral (Codec.Picture.imageWidth img))
+        (fromIntegral (Codec.Picture.imageHeight img))
+        0
+        GL.GL_RGBA
+        GL.GL_UNSIGNED_BYTE
+        . Foreign.castPtr)
+  GL.glPixelStorei GL.GL_UNPACK_ALIGNMENT 1
+  GL.glTexParameteri GL.GL_TEXTURE_2D GL.GL_TEXTURE_MIN_FILTER (fromIntegral GL.GL_LINEAR_MIPMAP_LINEAR)
+  GL.glTexParameteri GL.GL_TEXTURE_2D GL.GL_TEXTURE_MAG_FILTER (fromIntegral GL.GL_LINEAR)
+  GL.glTexParameteri GL.GL_TEXTURE_2D GL.GL_TEXTURE_WRAP_S (fromIntegral GL.GL_CLAMP_TO_EDGE)
+  GL.glTexParameteri GL.GL_TEXTURE_2D GL.GL_TEXTURE_WRAP_T (fromIntegral GL.GL_CLAMP_TO_EDGE)
   GL.glGenerateMipmap GL.GL_TEXTURE_2D
   pure textureID
 
@@ -950,6 +1000,9 @@ moveUp = moveCamera (v4 0 1 0 1) -- alt for vector literals: ijkl -> v4 0 1 0 1 
 moveDown = moveCamera (v4 0 (-1) 0 1) -- or v4 0 (-1) 0 1 = l - j
 
 
+genGraph :: (Foreign.Storable v, Vertex v) => [(v,v)] -> IO (IO ())
+genGraph edges = genBuffer [(2*i,2*i+1) | i <- [0..length edges-1]] (foldr (\(a,b) c -> [a,b] ++ c) [] edges)
+
 main :: IO ()
 main = do
   SDL.initializeAll
@@ -958,6 +1011,7 @@ main = do
   SDL.Raw.Event.setRelativeMouseMode True
 
   homeAssistantAuthToken <- takeWhile (/='\n') <$> readFile "homeAssistantAuthToken"
+  tiingoAuthToken <- takeWhile (/='\n') <$> readFile "tiingoAuthToken"
 
   --- INITIALIZE OPENGL --------------------------------------------------------
 
@@ -1180,12 +1234,50 @@ main = do
   
   stampTest <- genBuffer [(2,1,0)::(Int,Int,Int),(3,1,2)] [v2 1 1, v2 1 (-1), v2 (-1) 1, v2 (-1) (-1)]
 
-  drawCircle <- let numPoints = 100 in
-     genBuffer
-       [(i `mod` numPoints ,(i+1) `mod` numPoints) | i<-[0..numPoints+1]]
-       [v2 (cos (2 * pi * fromIntegral i / fromIntegral numPoints)) (sin (2 * pi * fromIntegral i / fromIntegral numPoints)) | i <- [0..numPoints]]
 
+  let evenlyDistribute numberOfSamples start end index = start + (end - start) * index / (numberOfSamples-1)
 
+  -- might be useful to have a generic system for parametrically sampling from a thing. e.g. a time parameter so we don't have to do the awkward chaining we are doing rn. alt: a function that takes callbacks? so we compute something like a fold? gonna keep shoehorning in CPS probs until i get sick of it
+
+  drawCircle <- 
+    let numberOfSamples = 100
+        indexToPos i = ap (a2 cos sin) (pure (2 * pi * fromIntegral i / fromIntegral numberOfSamples) :: Vec 2)
+    in genGraph [(indexToPos i, indexToPos (i+1)) | i <- [0..numberOfSamples-1]]
+
+  drawHGrid <-
+    let lineCount = 71
+    in genGraph
+        [ let x = evenlyDistribute (1+fromIntegral lineCount) (-1) 1 (fromIntegral i)
+          in (v2 x (-1),v2 x 1)
+          | i <- [0..lineCount]]
+
+  drawVGrid <-
+    let lineCount = 11
+    in genGraph
+        [ let y = evenlyDistribute (1+fromIntegral lineCount) (-1) 1 (fromIntegral i)
+          in (v2 (-1) y,v2 1 y)
+          | i <- [0..lineCount]]
+
+  let linearRemap (x0,y0) (x1,y1) x = (y1-y0)/(x1-x0)*x+(x1*y0-x0*y1)/(x1-x0)
+  let normalizeToRange low high xs = linearRemap (minimum xs, low) (maximum xs, high) <$> xs
+  
+  let request =
+        Network.HTTP.Simple.setRequestMethod "GET"
+        $ Network.HTTP.Simple.setRequestHeader "Authorization" ["Token " <> Data.String.fromString tiingoAuthToken]
+        $ Data.String.fromString "https://api.tiingo.com/tiingo/daily/uamy/prices?startDate=2025-05-02"
+
+  priceData :: Network.HTTP.Simple.Response [PriceInfo] <- Network.HTTP.Simple.httpJSON request
+  print (Network.HTTP.Simple.getResponseBody priceData)
+
+  drawSignal <-
+    let -- randomNumbers =
+        --    scanl (+) (-0.2) $ fst $ System.Random.uniformListR (numberOfSamples+1) (-0.5,0.51) (System.Random.mkStdGen 137)
+        randomNumbers = 
+          close <$> Network.HTTP.Simple.getResponseBody priceData
+        numberOfSamples = length randomNumbers
+        randomNumbersNormalized = normalizeToRange (-0.7) 0.7 randomNumbers
+        pointLoc i = v2 (evenlyDistribute (fromIntegral numberOfSamples) (-0.9) 0.9 (fromIntegral i)) (randomNumbersNormalized !! i)
+    in genGraph [(pointLoc i, pointLoc (i+1)) | i <- [0..numberOfSamples-2]]
 
   let readImg path = do
         img <- Codec.Picture.convertRGBA8 <$> (Codec.Picture.readImage path >>= either error pure)
@@ -1217,7 +1309,16 @@ main = do
   print fixedsysExtrema
   let fixedsysBounds = boundBoxSize font pointSize textToRender
   print fixedsysBounds
-  testingText <- loadTexture $ textToTexture font pointSize textToRender
+  testingText <- loadTextTexture $ textToTexture font pointSize textToRender
+
+
+  -- fixedsys <- Graphics.Text.TrueType.loadFontFile "resources/fixedsys.ttf" >>= either (fail.show) pure 
+  -- times <- Graphics.Text.TrueType.loadFontFile "resources/times.ttf" >>= either (fail.show) pure 
+  -- let font = fixedsys
+  let pointSize = 48
+  let textToRender = "UAMY:"
+  let tickerBounds = boundBoxSize font pointSize textToRender
+  tickerText <- loadTextTexture $ textToTexture font pointSize textToRender
 
 
   fixedsysTexture <- do
@@ -1248,7 +1349,7 @@ main = do
                         (Graphics.Rasterific.PointSize size)
                         (Graphics.Rasterific.V2 460 500)
                         "testing"
-    loadTexture fontText
+    loadTextTexture fontText
     
 
   --- CONFIGURE COMPUTE SHADER -------------------------------------------------
@@ -1290,6 +1391,8 @@ main = do
   emptyVao <- Foreign.alloca $ \ptr -> do
     GL.glCreateVertexArrays 1 ptr
     Foreign.peek ptr
+
+
 
   --- MAIN LOOP ----------------------------------------------------------------
   
@@ -1541,14 +1644,56 @@ main = do
           setShaderUniform uniform2dShader "worldToScreen" worldToScreen2d
           drawCircle
 
+
+
+
+
+
+
+        
+        
+        let graphTransform 
+               = translate2d (v2 (1/4) (7/8))
+               . scale2d (v2 (3/4) (1/8))
+        GL.glUseProgram uniform2dShader
+        setShaderUniform uniform2dShader "color" (v4 1 1 1 0.4)
+        setShaderUniform uniform2dShader "worldToScreen" graphTransform
+        drawHGrid
+        
+        GL.glUseProgram uniform2dShader
+        setShaderUniform uniform2dShader "color" (v4 1 1 1 0.4)
+        setShaderUniform uniform2dShader "worldToScreen" graphTransform
+        drawVGrid
+
+        GL.glClear GL.GL_DEPTH_BUFFER_BIT
+
+        GL.glUseProgram uniform2dShader
+        setShaderUniform uniform2dShader "color" (v4 1 1 1 1)
+        setShaderUniform uniform2dShader "worldToScreen" graphTransform
+        drawSignal
+
+
         GL.glClear GL.GL_DEPTH_BUFFER_BIT
         
-        -- UI elements
-        -- should maybe have depth parameter for each call? would be more efficient i think
-        -- for now, calling in order does the trick
         
         let pixelCoordToWindowLoc (v :: Vec 2) =
               v2 (2 * v x / windowDimensions appState x - 1) (1 - 2 * v y / windowDimensions appState y)
+        let (aboveBaseline, textWidth, textHeight) = tickerBounds
+
+        GL.glDepthMask GL.GL_FALSE
+        GL.glActiveTexture GL.GL_TEXTURE0
+        GL.glBindTexture GL.GL_TEXTURE_2D tickerText
+        GL.glUseProgram stampShader
+        setShaderUniform stampShader "width" (textWidth / windowDimensions appState x)
+        setShaderUniform stampShader "height" (textHeight / windowDimensions appState y)
+        setShaderUniform stampShader "center" (v2 (-3/4) (7/8))
+        Foreign.C.String.withCString "texture" (GL.glGetUniformLocation stampShader) >>= flip GL.glUniform1i 0
+        stampTest
+        GL.glDepthMask GL.GL_TRUE
+
+        -- UI elements
+        -- should maybe have depth parameter for each call? would be more efficient i think
+        -- for now, calling in order does the trick
 
         let (aboveBaseline, textWidth, textHeight) = fixedsysBounds
         let baselineOffsetFromCenter = aboveBaseline - textHeight/2
@@ -1585,9 +1730,6 @@ main = do
         stampTest
         GL.glDepthMask GL.GL_TRUE
 
-
-
-        
         GL.glDepthMask GL.GL_FALSE
         GL.glActiveTexture GL.GL_TEXTURE0
         GL.glBindTexture GL.GL_TEXTURE_2D testingText
